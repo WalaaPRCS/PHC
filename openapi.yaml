@@ -1,0 +1,215 @@
+openapi: 3.1.0
+info:
+  title: PRCS Primary Health Clinic API
+  version: 1.0.0
+  description: Versioned API for the self-hosted PRCS primary care records platform.
+servers:
+  - url: /api/v1
+security:
+  - sessionCookie: []
+paths:
+  /health:
+    get:
+      security: []
+      summary: Check application and PostgreSQL health
+      responses:
+        '200':
+          description: Database connection is healthy
+  /auth/login:
+    post:
+      security: []
+      summary: Sign in with username and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200': { description: Authenticated user and HttpOnly session cookie }
+        '401': { description: Invalid credentials }
+        '429': { description: Login temporarily rate limited }
+  /auth/session:
+    get:
+      summary: Get the current authenticated user and clinic assignments
+      responses:
+        '200': { description: Current user }
+        '401': { description: Authentication required }
+  /auth/logout:
+    post:
+      summary: Revoke the current session
+      responses:
+        '200': { description: Session ended }
+  /integrations/token:
+    post:
+      security: []
+      summary: Exchange an integration client ID and secret for a scoped bearer token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clientId, clientSecret]
+              properties:
+                clientId: { type: string }
+                clientSecret: { type: string, format: password }
+      responses:
+        '200': { description: One hour bearer token; response is not cacheable }
+        '401': { description: Client credentials are invalid }
+  /integrations/clients:
+    get:
+      summary: List integration clients without credential hashes (system admin only)
+      responses:
+        '200': { description: Integration clients and last use }
+        '403': { description: System administrator required }
+    post:
+      summary: Create an integration client and return its secret once (system admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name: { type: string }
+                scopes: { type: array, items: { type: string } }
+      responses:
+        '201': { description: Client credentials; store the returned secret securely }
+        '403': { description: System administrator required }
+  /integrations/clients/{clientId}/revoke:
+    post:
+      summary: Revoke an integration client and its active tokens (system admin only)
+      parameters:
+        - in: path
+          name: clientId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Client disabled and active tokens removed }
+        '404': { description: Client not found }
+  /state:
+    get:
+      summary: Load permitted clinic application records
+      responses:
+        '200': { description: Resource arrays scoped to role and assigned clinics }
+  /records/{resource}:
+    put:
+      summary: Upsert records in a supported resource collection
+      parameters:
+        - in: path
+          name: resource
+          required: true
+          schema: { type: string, enum: [clinics, staff, projects, allocations, patients, immunizations, visits, queue, pharmacy_stock, dispenses, drug_catalog, lab_orders] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [records]
+              properties:
+                records: { type: array, items: { type: object } }
+                deletedIds: { type: array, items: { type: string } }
+      responses:
+        '200': { description: Records stored and normalized where supported }
+        '403': { description: Role or clinic scope does not permit this write }
+  /patients/lookup:
+    get:
+      summary: Find a unified patient record by national identifier (human session or patients:lookup scope)
+      security:
+        - sessionCookie: []
+        - integrationBearer: [patients:lookup]
+      parameters:
+        - in: query
+          name: nationalId
+          required: true
+          schema: { type: string, minLength: 6, maxLength: 20 }
+      responses:
+        '200': { description: Patient demographics and latest visit summary }
+        '404': { description: Patient not found }
+  /pharmacy/dispense:
+    post:
+      summary: Atomically dispense multiple medicines to one patient
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileNo, clinic, items]
+              properties:
+                fileNo: { type: string }
+                clinic: { type: string, description: Local clinic ID, code, or name }
+                instructions: { type: string }
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 30
+                  items:
+                    type: object
+                    required: [stockId, quantity, dose]
+                    properties:
+                      stockId: { type: string }
+                      quantity: { type: integer, minimum: 1 }
+                      dose: { type: string }
+                      duration: { type: string }
+      responses:
+        '201': { description: Visit, updated patient and updated stock balances }
+        '409': { description: Stock unavailable or insufficient }
+  /interop/identity-map:
+    get:
+      summary: List external identity mappings (admin session or identity-map:read scope)
+      security:
+        - sessionCookie: []
+        - integrationBearer: [identity-map:read]
+      responses:
+        '200': { description: Mappings }
+    post:
+      summary: Add or update a stable local to external identity mapping (admin session or identity-map:write scope)
+      security:
+        - sessionCookie: []
+        - integrationBearer: [identity-map:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceSystem, entityType, localId, externalId]
+              properties:
+                sourceSystem: { type: string }
+                sourceName: { type: string }
+                entityType: { type: string }
+                localId: { type: string }
+                externalId: { type: string }
+                externalVersion: { type: string }
+                metadata: { type: object }
+      responses:
+        '200': { description: Mapping created or updated }
+        '409': { description: External ID is already mapped }
+  /users:
+    get:
+      summary: List user accounts (system admin only)
+      responses:
+        '200': { description: User accounts and clinic assignments }
+    post:
+      summary: Create username and password account (system admin only)
+      responses:
+        '201': { description: User created }
+        '409': { description: Username already exists }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: phc_session
+    integrationBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque

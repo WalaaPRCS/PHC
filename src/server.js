@@ -1,0 +1,868 @@
+import { createServer } from 'node:http';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { join, extname, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHmac, randomUUID } from 'node:crypto';
+import { promisify } from 'node:util';
+import { scrypt as scryptCallback } from 'node:crypto';
+import { pool, audit } from './db.js';
+import { hashPassword, verifyPassword, opaqueToken, tokenHash, encryptNationalId, decryptNationalId, hashNationalId } from './security.js';
+
+const root = fileURLToPath(new URL('../public/', import.meta.url));
+const scrypt = promisify(scryptCallback);
+const sessionDurationMs = 8 * 60 * 60 * 1000;
+const maxBodyBytes = 1_000_000;
+const stateKeys = {
+  clinics: 'prcsDemoClinicsV1', staff: 'prcsDemoStaffV1', projects: 'prcsDemoProjectsV1',
+  allocations: 'prcsDemoAllocationsV1', patients: 'prcsDemoPatientRecordsV1',
+  immunizations: 'prcsDemoImmunizationsV1', visits: 'prcsDemoVisitsV1', queue: 'prcsDemoQueueV1',
+  pharmacy_stock: 'prcsDemoPharmacyStockV1', dispenses: 'prcsDemoDispenseRecordsV1',
+  drug_catalog: 'prcsDemoDrugCatalogV1', lab_orders: 'prcsDemoLabOrdersV1',
+};
+const writeRoles = {
+  clinics: ['system_admin'], staff: ['system_admin', 'clinic_admin'], projects: ['system_admin'],
+  allocations: ['system_admin'], patients: ['system_admin', 'clinic_admin', 'clinician', 'reception', 'pharmacist', 'lab_technician'],
+  immunizations: ['system_admin', 'clinic_admin', 'clinician'], visits: ['system_admin', 'clinic_admin', 'clinician'],
+  queue: ['system_admin', 'clinic_admin', 'reception'], pharmacy_stock: ['system_admin'],
+  dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin'],
+  lab_orders: ['system_admin', 'clinic_admin', 'clinician', 'lab_technician'],
+};
+const readRoles = {
+  clinics: ['system_admin', 'clinic_admin', 'clinician', 'reception', 'pharmacist', 'lab_technician', 'viewer'],
+  staff: ['system_admin', 'clinic_admin', 'clinician', 'reception', 'pharmacist', 'lab_technician', 'viewer'],
+  projects: ['system_admin', 'clinic_admin', 'clinician', 'viewer'], allocations: ['system_admin', 'clinic_admin', 'clinician', 'viewer'],
+  patients: ['system_admin', 'clinic_admin', 'clinician', 'reception', 'pharmacist', 'lab_technician', 'viewer'],
+  immunizations: ['system_admin', 'clinic_admin', 'clinician', 'viewer'], visits: ['system_admin', 'clinic_admin', 'clinician', 'pharmacist', 'lab_technician', 'viewer'],
+  queue: ['system_admin', 'clinic_admin', 'reception'], pharmacy_stock: ['system_admin', 'clinic_admin', 'pharmacist'],
+  dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin', 'clinic_admin', 'pharmacist'],
+  lab_orders: ['system_admin', 'clinic_admin', 'clinician', 'lab_technician', 'viewer'],
+};
+const authFailures = new Map();
+
+function requiredEnv(name, min = 1) {
+  const value = process.env[name];
+  if (!value || value.length < min) throw new Error(`${name} must be set and at least ${min} characters`);
+  return value;
+}
+
+function sessionHash(token) {
+  return createHmac('sha256', requiredEnv('SESSION_SECRET', 32)).update(token).digest('hex');
+}
+
+function send(res, status, payload, headers = {}) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'same-origin',
+    ...headers,
+  });
+  res.end(body);
+}
+
+function cookieValue(header, name) {
+  for (const part of String(header || '').split(';')) {
+    const [key, ...value] = part.trim().split('=');
+    if (key === name) return decodeURIComponent(value.join('='));
+  }
+  return '';
+}
+
+async function readJson(req) {
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of req) {
+    length += chunk.length;
+    if (length > maxBodyBytes) throw Object.assign(new Error('حجم الطلب أكبر من المسموح'), { status: 413 });
+    chunks.push(chunk);
+  }
+  if (!length) return {};
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch { throw Object.assign(new Error('صيغة JSON غير صحيحة'), { status: 400 }); }
+}
+
+async function currentUser(req) {
+  const token = cookieValue(req.headers.cookie, 'phc_session');
+  if (!token) return null;
+  const { rows } = await pool.query(
+    `SELECT u.id, u.username, u.display_name AS "displayName", u.role, u.active, s.token_hash
+       FROM user_sessions s JOIN app_users u ON u.id=s.user_id
+      WHERE s.token_hash=$1 AND s.expires_at > now() AND u.active=true`, [sessionHash(token)],
+  );
+  if (!rows[0]) return null;
+  const clinics = await pool.query('SELECT clinic_ref FROM user_clinic_refs WHERE user_id=$1 ORDER BY clinic_ref', [rows[0].id]);
+  return { ...rows[0], clinicRefs: clinics.rows.map((row) => row.clinic_ref) };
+}
+
+async function currentIntegration(req) {
+  const match = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || ''));
+  if (!match) return null;
+  const tokenDigest = tokenHash(match[1]);
+  const { rows } = await pool.query(
+    `SELECT c.id,c.client_id,c.name,t.scopes
+       FROM integration_access_tokens t JOIN integration_clients c ON c.id=t.client_id
+      WHERE t.token_hash=$1 AND t.expires_at>now() AND c.enabled=true`, [tokenDigest],
+  );
+  if (!rows[0]) return null;
+  await pool.query('UPDATE integration_clients SET last_used_at=now() WHERE id=$1', [rows[0].id]);
+  return { id: rows[0].id, clientId: rows[0].client_id, name: rows[0].name, scopes: rows[0].scopes };
+}
+
+function hasScope(integration, scope) {
+  return integration?.scopes?.includes(scope) || integration?.scopes?.includes('*') || false;
+}
+
+function assertSameOrigin(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  const host = req.headers.host;
+  if (new URL(origin).host !== host) {
+    send(res, 403, { error: 'origin_not_allowed' });
+    return false;
+  }
+  return true;
+}
+
+function normalizedClinicRef(record, clinics) {
+  const raw = record?.clinicId ?? record?.clinic_id ?? record?.clinicCode ?? '';
+  if (raw) return String(raw);
+  const name = String(record?.clinic || '');
+  return clinics.find((clinic) => clinic.id === name || clinic.name === name || clinic.code === name)?.id || '';
+}
+
+function filterPatientRecord(record, user, clinics) {
+  if (user.role === 'system_admin') return record;
+  const allowed = new Set(user.clinicRefs);
+  const visits = Array.isArray(record.visits) ? record.visits : [];
+  const own = visits.filter((visit) => allowed.has(normalizedClinicRef(visit, clinics)));
+  const latestOther = visits.filter((visit) => !allowed.has(normalizedClinicRef(visit, clinics))).sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+  if (!own.length && !latestOther) return null;
+  return { ...record, visits: own.sort((a, b) => new Date(b.date) - new Date(a.date)), latestOtherVisit: latestOther ? { id: latestOther.id, date: latestOther.date, clinic: latestOther.clinic, service: latestOther.service, status: latestOther.status } : null };
+}
+
+function canReadResource(user, resource) {
+  return readRoles[resource]?.includes(user.role) || false;
+}
+function canWriteResource(user, resource) {
+  return writeRoles[resource]?.includes(user.role) || false;
+}
+
+async function loadState(user) {
+  const result = {};
+  const clinicRes = await pool.query("SELECT record_id,payload FROM app_records WHERE resource='clinics'");
+  const clinics = clinicRes.rows.map((row) => row.payload);
+  for (const [resource, storageKey] of Object.entries(stateKeys)) {
+    if (!canReadResource(user, resource)) { result[storageKey] = []; continue; }
+    const { rows } = await pool.query('SELECT record_id, clinic_ref, payload FROM app_records WHERE resource=$1', [resource]);
+    let visible = rows;
+    if (user.role !== 'system_admin') {
+    if (resource === 'patients') {
+        visible = rows.filter((row) => {
+          const ownVisit = (row.payload.visits || []).some((visit) => user.clinicRefs.includes(normalizedClinicRef(visit, clinics)));
+          return user.clinicRefs.includes(String(row.clinic_ref || '')) || ownVisit;
+        });
+      } else if (resource === 'projects') {
+        const allocations = (await pool.query('SELECT payload FROM app_records WHERE resource=$1', ['allocations'])).rows.map((r) => r.payload);
+        const allowedProjects = new Set(allocations.filter((a) => user.clinicRefs.includes(String(a.clinicId))).map((a) => String(a.projectId)));
+        visible = rows.filter((row) => allowedProjects.has(row.record_id));
+      } else if (resource === 'drug_catalog') {
+        visible = rows;
+      } else {
+        visible = rows.filter((row) => !row.clinic_ref || user.clinicRefs.includes(row.clinic_ref));
+      }
+    }
+    let records = visible.map((row) => row.payload);
+    if (resource === 'clinics' && user.role !== 'system_admin') records = records.filter((clinic) => user.clinicRefs.includes(String(clinic.id)));
+    if (resource === 'patients' && user.role !== 'system_admin') records = records.map((item) => filterPatientRecord(item, user, clinics)).filter(Boolean);
+    result[storageKey] = records;
+  }
+  return result;
+}
+
+async function syncNormalized(client, resource, payload, recordId) {
+  if (resource === 'clinics') {
+    const code = String(payload.code || recordId).slice(0, 120);
+    await client.query(
+      `INSERT INTO clinics(code,name,status,location,address,phone,metadata)
+       VALUES($1,$2,$3,$4,$5,$6,jsonb_build_object('appRecordId',$7))
+       ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name,status=EXCLUDED.status,location=EXCLUDED.location,
+         address=EXCLUDED.address,phone=EXCLUDED.phone,metadata=clinics.metadata || EXCLUDED.metadata,updated_at=now()`,
+      [code, payload.name || code, payload.status || 'active', payload.location || '', payload.address || '', payload.phone || '', recordId],
+    );
+    const clinic = await client.query('SELECT id FROM clinics WHERE code=$1', [code]);
+    await client.query('DELETE FROM clinic_services WHERE clinic_id=$1', [clinic.rows[0].id]);
+    for (const serviceName of payload.services || []) {
+      await client.query('INSERT INTO clinic_services(clinic_id,service_id) SELECT $1,id FROM service_catalog WHERE name=$2 ON CONFLICT DO NOTHING', [clinic.rows[0].id, serviceName]);
+    }
+  }
+  if (resource === 'patients') {
+    const patientNumber = String(payload.fileNo || payload.patientNumber || recordId);
+    const gender = payload.gender || null;
+    await client.query(
+      `INSERT INTO patients(patient_number,national_id_hash,national_id_ciphertext,full_name,date_of_birth,gender,phone,alternate_phone,address,metadata)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+       ON CONFLICT(patient_number) DO UPDATE SET national_id_hash=COALESCE(EXCLUDED.national_id_hash,patients.national_id_hash),
+         national_id_ciphertext=COALESCE(EXCLUDED.national_id_ciphertext,patients.national_id_ciphertext),full_name=EXCLUDED.full_name,
+         date_of_birth=EXCLUDED.date_of_birth,gender=EXCLUDED.gender,phone=EXCLUDED.phone,
+         alternate_phone=EXCLUDED.alternate_phone,address=EXCLUDED.address,metadata=patients.metadata || EXCLUDED.metadata,updated_at=now()`,
+      [patientNumber, payload.nationalId ? hashNationalId(payload.nationalId) : null, payload.nationalId ? encryptNationalId(payload.nationalId) : null, payload.name || 'مريض', payload.dateOfBirth || null, gender, payload.phone || null, payload.alternatePhone || null, payload.address || null,
+        JSON.stringify({ fileNo: patientNumber, bloodType: payload.bloodType || null })],
+    );
+    for (const visit of Array.isArray(payload.visits) ? payload.visits : []) {
+      await upsertNormalizedVisit(client, patientNumber, visit);
+      const normalized = [...(visit.referrals || []), ...(visit.referralDetails ? [visit.referralDetails] : [])];
+      const typedVisit = await client.query('SELECT id FROM visits WHERE visit_number=$1', [`${patientNumber}:${String(visit.id || visit.date || '')}`]);
+      for (const referral of normalized) {
+        const sourceId = String(referral.id || `${visit.id}:${referral.type}:${referral.destination}`);
+        if (typedVisit.rows[0]) await syncReferral(client, typedVisit.rows[0].id, referral, sourceId);
+      }
+    }
+  }
+  if (resource === 'visits') {
+    const patientNumber = String(payload.fileNo || payload.patientNumber || '');
+    const patient = await client.query('SELECT id FROM patients WHERE patient_number=$1', [patientNumber]);
+    if (!patient.rows[0]) return;
+    const visitId = await upsertNormalizedVisit(client, patientNumber, payload);
+    if (visitId && payload.referralDetails) await syncReferral(client, visitId, payload.referralDetails, String(payload.referralDetails.id || `${recordId}:referral`));
+    for (const referral of payload.referrals || []) if (visitId) await syncReferral(client, visitId, referral, String(referral.id || `${recordId}:${referral.type}:${referral.destination}`));
+    for (const test of payload.labTests || []) if (visitId) await syncLabOrder(client, { ...test, fileNo: patientNumber, visitId: payload.id }, String(test.id || `${recordId}:lab:${test.testName}`));
+    for (const vaccine of payload.immunizations || []) if (visitId) await syncImmunization(client, { ...vaccine, fileNo: patientNumber, visitId: payload.id }, String(vaccine.id || `${recordId}:vaccine`));
+  }
+  if (resource === 'staff') {
+    const clinic = await client.query("SELECT id FROM clinics WHERE metadata->>'appRecordId'=$1 LIMIT 1", [String(payload.clinicId || '')]);
+    if (!clinic.rows[0]) return;
+    const specialty = await client.query('SELECT id FROM service_catalog WHERE name=$1', [payload.specialtyService || '']);
+    await client.query(
+      `INSERT INTO staff_members(source_record_id,clinic_id,external_code,display_name,job_title,specialty_service_id,phone,active,metadata)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+       ON CONFLICT(source_record_id) DO UPDATE SET clinic_id=EXCLUDED.clinic_id,external_code=EXCLUDED.external_code,
+        display_name=EXCLUDED.display_name,job_title=EXCLUDED.job_title,specialty_service_id=EXCLUDED.specialty_service_id,
+        phone=EXCLUDED.phone,active=EXCLUDED.active,metadata=EXCLUDED.metadata`,
+      [recordId, clinic.rows[0].id, payload.employeeCode || null, payload.name || 'مقدم خدمة', payload.jobTitle || 'مقدم خدمة', specialty.rows[0]?.id || null, payload.phone || null, payload.status !== 'موقوف', JSON.stringify({ services: payload.services || [] })],
+    );
+    const staff = await client.query('SELECT id FROM staff_members WHERE source_record_id=$1', [recordId]);
+    await client.query('DELETE FROM staff_services WHERE staff_id=$1', [staff.rows[0].id]);
+    for (const serviceName of payload.services || []) {
+      await client.query('INSERT INTO staff_services(staff_id,service_id) SELECT $1,id FROM service_catalog WHERE name=$2 ON CONFLICT DO NOTHING', [staff.rows[0].id, serviceName]);
+    }
+  }
+  if (resource === 'projects') {
+    const code = String(payload.code || recordId).slice(0, 120);
+    await client.query(
+      `INSERT INTO projects(source_record_id,code,name,donor,starts_on,ends_on,status,metadata)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+       ON CONFLICT(source_record_id) DO UPDATE SET code=EXCLUDED.code,name=EXCLUDED.name,donor=EXCLUDED.donor,
+        starts_on=EXCLUDED.starts_on,ends_on=EXCLUDED.ends_on,status=EXCLUDED.status,metadata=EXCLUDED.metadata`,
+      [recordId, code, payload.name || code, payload.donor || null, payload.start || null, payload.end || null, payload.status || 'active', JSON.stringify({ description: payload.description || '' })],
+    );
+    const project = await client.query('SELECT id FROM projects WHERE source_record_id=$1', [recordId]);
+    for (const service of payload.services || []) {
+      const serviceId = await client.query('SELECT id FROM service_catalog WHERE name=$1', [service.name]);
+      if (!serviceId.rows[0]) continue;
+      await client.query('INSERT INTO project_services(project_id,service_id,goal) VALUES($1,$2,$3) ON CONFLICT(project_id,service_id) DO UPDATE SET goal=EXCLUDED.goal', [project.rows[0].id, serviceId.rows[0].id, service.goal || '']);
+    }
+    for (const indicator of payload.indicators || []) {
+      const serviceId = await client.query('SELECT id FROM service_catalog WHERE name=$1', [indicator.service]);
+      if (!serviceId.rows[0]) continue;
+      const ps = await client.query('SELECT id FROM project_services WHERE project_id=$1 AND service_id=$2', [project.rows[0].id, serviceId.rows[0].id]);
+      await client.query(
+        `INSERT INTO project_indicators(source_record_id,project_service_id,code,name,unit,baseline,target,frequency)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT(source_record_id) DO UPDATE SET project_service_id=EXCLUDED.project_service_id,code=EXCLUDED.code,
+          name=EXCLUDED.name,unit=EXCLUDED.unit,baseline=EXCLUDED.baseline,target=EXCLUDED.target,frequency=EXCLUDED.frequency`,
+        [String(indicator.id || `${recordId}:${indicator.service}:${indicator.name}`), ps.rows[0].id, String(indicator.id || ''), indicator.name, indicator.unit || 'count', Number(indicator.baseline || 0), Number(indicator.target || 0), indicator.frequency || null],
+      );
+    }
+  }
+  if (resource === 'allocations') {
+    const clinic = await client.query("SELECT id FROM clinics WHERE metadata->>'appRecordId'=$1 LIMIT 1", [String(payload.clinicId || '')]);
+    const project = await client.query('SELECT id FROM projects WHERE source_record_id=$1', [String(payload.projectId || '')]);
+    const service = await client.query('SELECT id FROM service_catalog WHERE name=$1', [payload.service || '']);
+    if (!clinic.rows[0] || !project.rows[0] || !service.rows[0]) return;
+    const projectService = await client.query('SELECT id FROM project_services WHERE project_id=$1 AND service_id=$2', [project.rows[0].id, service.rows[0].id]);
+    if (!projectService.rows[0]) return;
+    const indicator = await client.query('SELECT id FROM project_indicators WHERE source_record_id=$1', [String(payload.indicatorId || '')]);
+    await client.query(
+      `INSERT INTO clinic_project_services(source_record_id,clinic_id,project_service_id,indicator_id,clinic_goal,target,coverage_percent,starts_on,ends_on,active)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ON CONFLICT(source_record_id) DO UPDATE SET clinic_id=EXCLUDED.clinic_id,project_service_id=EXCLUDED.project_service_id,
+        indicator_id=EXCLUDED.indicator_id,clinic_goal=EXCLUDED.clinic_goal,target=EXCLUDED.target,
+        coverage_percent=EXCLUDED.coverage_percent,starts_on=EXCLUDED.starts_on,ends_on=EXCLUDED.ends_on,active=EXCLUDED.active`,
+      [recordId, clinic.rows[0].id, projectService.rows[0].id, indicator.rows[0]?.id || null, payload.goal || null, Number(payload.target || 0), Number(payload.percent ?? 100), payload.start || null, payload.end || null, payload.active !== false],
+    );
+  }
+  if (resource === 'drug_catalog') {
+    await client.query(
+      `INSERT INTO drug_catalog(source_record_id,code,generic_name,brand_name,strength,dosage_form,unit,aliases,metadata,active)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,true)
+       ON CONFLICT(source_record_id) DO UPDATE SET code=EXCLUDED.code,generic_name=EXCLUDED.generic_name,
+        brand_name=EXCLUDED.brand_name,strength=EXCLUDED.strength,dosage_form=EXCLUDED.dosage_form,unit=EXCLUDED.unit,
+        aliases=EXCLUDED.aliases,metadata=EXCLUDED.metadata,active=true`,
+      [recordId, String(payload.code || recordId), payload.generic || payload.name || recordId, payload.name || null, payload.strength || null, payload.form || null, payload.sourceUnit || null, payload.aliases || [], JSON.stringify(payload)],
+    );
+  }
+  if (resource === 'pharmacy_stock') {
+    const clinic = await client.query("SELECT id FROM clinics WHERE metadata->>'appRecordId'=$1 OR name=$1 OR code=$1 ORDER BY CASE WHEN metadata->>'appRecordId'=$1 THEN 0 ELSE 1 END,created_at LIMIT 1", [String(payload.clinicId || payload.clinic || '')]);
+    const drug = await client.query('SELECT id FROM drug_catalog WHERE source_record_id=$1', [String(payload.drugId || '')]);
+    if (!clinic.rows[0] || !drug.rows[0]) return;
+    await client.query(
+      `INSERT INTO pharmacy_stock(source_record_id,clinic_id,drug_id,batch_number,expiry_date,quantity,unit_cost)
+       VALUES($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT(source_record_id) DO UPDATE SET clinic_id=EXCLUDED.clinic_id,drug_id=EXCLUDED.drug_id,
+        batch_number=EXCLUDED.batch_number,expiry_date=EXCLUDED.expiry_date,quantity=EXCLUDED.quantity,
+        unit_cost=EXCLUDED.unit_cost,updated_at=now()`,
+      [recordId, clinic.rows[0].id, drug.rows[0].id, payload.batch || null, payload.expiry || null, Number(payload.quantity || 0), payload.unitCostNis ?? null],
+    );
+  }
+  if (resource === 'lab_orders') {
+    const patientNumber = String(payload.fileNo || payload.patientNumber || '');
+    const patient = await client.query('SELECT payload FROM app_records WHERE resource=$1 AND record_id=$2', ['patients', patientNumber]);
+    const visit = (patient.rows[0]?.payload.visits || []).find((item) => item.id === payload.visitId);
+    if (visit) {
+      await upsertNormalizedVisit(client, patientNumber, visit);
+      const visitNumber = `${patientNumber}:${payload.visitId}`;
+      await syncLabOrder(client, { ...payload, visitNumber }, recordId);
+    }
+  }
+  if (resource === 'immunizations') await syncImmunization(client, payload, recordId);
+  if (resource === 'dispenses') await syncDispensation(client, payload, recordId);
+  if (resource === 'patients') {
+    const patient = await client.query('SELECT id FROM patients WHERE patient_number=$1', [String(payload.fileNo || payload.patientNumber || recordId)]);
+    for (const visit of Array.isArray(payload.visits) ? payload.visits : []) {
+      const visitId = await upsertNormalizedVisit(client, String(payload.fileNo || payload.patientNumber || recordId), visit);
+      if (visitId) {
+        const referrals = [...(visit.referrals || []), ...(visit.referralDetails ? [visit.referralDetails] : [])];
+        for (const referral of referrals) await syncReferral(client, visitId, referral, String(referral.id || `${visit.id}:${referral.type}:${referral.destination}`));
+      }
+    }
+  }
+}
+
+async function upsertNormalizedVisit(client, patientNumber, visit) {
+  if (!patientNumber || !visit) return null;
+  const patient = await client.query('SELECT id FROM patients WHERE patient_number=$1', [patientNumber]);
+  const clinicName = String(visit.clinic || '');
+  const clinic = await client.query("SELECT id FROM clinics WHERE metadata->>'appRecordId'=$1 OR name=$1 OR code=$1 ORDER BY CASE WHEN metadata->>'appRecordId'=$1 THEN 0 ELSE 1 END,created_at LIMIT 1", [String(visit.clinicId || clinicName)]);
+  if (!patient.rows[0] || !clinic.rows[0]) return null;
+  const service = await client.query('SELECT id FROM service_catalog WHERE name=$1', [visit.service || '']);
+  const visitKey = `${patientNumber}:${String(visit.id || visit.date || randomUUID())}`.slice(0, 250);
+  const result = await client.query(
+    `INSERT INTO visits(visit_number,patient_id,clinic_id,service_id,occurred_at,status,chief_complaint,assessment,diagnosis,plan,vitals,clinical_data)
+     VALUES($1,$2,$3,$4,COALESCE($5::timestamptz,now()),$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb)
+     ON CONFLICT(visit_number) DO UPDATE SET clinic_id=EXCLUDED.clinic_id,service_id=EXCLUDED.service_id,
+      occurred_at=EXCLUDED.occurred_at,status=EXCLUDED.status,chief_complaint=EXCLUDED.chief_complaint,
+      assessment=EXCLUDED.assessment,diagnosis=EXCLUDED.diagnosis,plan=EXCLUDED.plan,vitals=EXCLUDED.vitals,clinical_data=EXCLUDED.clinical_data
+     RETURNING id`,
+    [visitKey, patient.rows[0].id, clinic.rows[0].id, service.rows[0]?.id || null, visit.date || null, visit.status || 'completed', visit.complaint || null,
+      visit.assessment || null, visit.diagnosis || null, visit.plan || null, JSON.stringify(visit.vitals || {}), JSON.stringify(visit)],
+  );
+  return result.rows[0].id;
+}
+
+async function syncLabOrder(client, data, recordId) {
+  const patient = await client.query('SELECT id FROM patients WHERE patient_number=$1', [String(data.fileNo || '')]);
+  const visitNumber = String(data.visitNumber || `${data.fileNo}:${data.visitId}`);
+  const visit = patient.rows[0] ? await client.query('SELECT id FROM visits WHERE visit_number=$1', [visitNumber]) : { rows: [] };
+  if (!visit.rows[0]) return;
+  await client.query(
+    `INSERT INTO lab_orders(source_record_id,visit_id,test_code,test_name,specimen,priority,status,result_value,result_unit,reference_range,result_notes,requested_at,resulted_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,COALESCE($12::timestamptz,now()),$13)
+     ON CONFLICT(source_record_id) DO UPDATE SET visit_id=EXCLUDED.visit_id,test_code=EXCLUDED.test_code,test_name=EXCLUDED.test_name,
+      specimen=EXCLUDED.specimen,priority=EXCLUDED.priority,status=EXCLUDED.status,result_value=EXCLUDED.result_value,
+      result_unit=EXCLUDED.result_unit,reference_range=EXCLUDED.reference_range,result_notes=EXCLUDED.result_notes,
+      requested_at=EXCLUDED.requested_at,resulted_at=EXCLUDED.resulted_at`,
+    [recordId, visit.rows[0].id, data.testCode || null, data.testName || 'تحليل', data.specimen || null, data.priority || 'routine', data.status || 'requested', data.resultValue || null, data.resultUnit || null, data.referenceRange || null, data.resultNotes || null, data.requestedAt || null, data.resultAt || null],
+  );
+}
+
+async function syncImmunization(client, data, recordId) {
+  const patient = await client.query('SELECT id FROM patients WHERE patient_number=$1', [String(data.fileNo || '')]);
+  const clinic = await client.query("SELECT id FROM clinics WHERE metadata->>'appRecordId'=$1 OR name=$1 ORDER BY created_at LIMIT 1", [String(data.clinicId || data.clinic || '')]);
+  if (!patient.rows[0] || !clinic.rows[0]) return;
+  const doseVisit = data.visitId ? await client.query('SELECT id FROM visits WHERE visit_number=$1', [String(data.visitNumber || `${data.fileNo}:${data.visitId}`)]) : { rows: [] };
+  await client.query(
+    `INSERT INTO immunizations(source_record_id,patient_id,visit_id,clinic_id,vaccine_code,vaccine_name,dose,status,administered_at,due_at,batch_number,metadata)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+     ON CONFLICT(source_record_id) DO UPDATE SET patient_id=EXCLUDED.patient_id,visit_id=EXCLUDED.visit_id,clinic_id=EXCLUDED.clinic_id,
+      vaccine_code=EXCLUDED.vaccine_code,vaccine_name=EXCLUDED.vaccine_name,dose=EXCLUDED.dose,status=EXCLUDED.status,
+      administered_at=EXCLUDED.administered_at,due_at=EXCLUDED.due_at,batch_number=EXCLUDED.batch_number,metadata=EXCLUDED.metadata`,
+    [recordId, patient.rows[0].id, doseVisit.rows[0]?.id || null, clinic.rows[0].id, data.vaccineCode || null, data.vaccine || 'تطعيم', data.dose || 'غير محدد', data.status || 'مجدول', data.status === 'أُعطي' ? data.date || null : null, data.dueDate || null, data.batch || null, JSON.stringify(data)],
+  );
+}
+
+async function syncReferral(client, visitId, data, recordId) {
+  if (!data || !data.type || !data.destination) return;
+  const visitUuid = typeof visitId === 'string' && /^[0-9a-f-]{36}$/i.test(visitId) ? visitId : '';
+  if (!visitUuid) return;
+  const service = await client.query('SELECT id FROM service_catalog WHERE name=$1', [data.targetService || '']);
+  await client.query(
+    `INSERT INTO referrals(source_record_id,visit_id,referral_type,destination,target_service_id,urgency,reason,status,follow_up_at,outcome)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+     ON CONFLICT(source_record_id) DO UPDATE SET visit_id=EXCLUDED.visit_id,referral_type=EXCLUDED.referral_type,
+      destination=EXCLUDED.destination,target_service_id=EXCLUDED.target_service_id,urgency=EXCLUDED.urgency,
+      reason=EXCLUDED.reason,status=EXCLUDED.status,follow_up_at=EXCLUDED.follow_up_at,outcome=EXCLUDED.outcome`,
+    [recordId, visitUuid, data.type, data.destination, service.rows[0]?.id || null, data.urgency || null, data.reason || '', data.status || 'open', data.followUpAt || null, JSON.stringify({ outcomeNotes: data.outcomeNotes || '' })],
+  );
+}
+
+async function syncDispensation(client, data, recordId) {
+  const stock = await client.query('SELECT id FROM pharmacy_stock WHERE source_record_id=$1', [String(data.stockId || '')]);
+  const visit = await client.query('SELECT id FROM visits WHERE visit_number=$1', [`${data.fileNo}:${data.visitId}`]);
+  if (!stock.rows[0] || !visit.rows[0]) return;
+  await client.query(
+    `INSERT INTO dispensations(source_record_id,visit_id,stock_id,quantity,dose,duration,instructions)
+     VALUES($1,$2,$3,$4,$5,$6,$7)
+     ON CONFLICT(source_record_id) DO UPDATE SET visit_id=EXCLUDED.visit_id,stock_id=EXCLUDED.stock_id,
+      quantity=EXCLUDED.quantity,dose=EXCLUDED.dose,duration=EXCLUDED.duration,instructions=EXCLUDED.instructions`,
+    [recordId, visit.rows[0].id, stock.rows[0].id, Number(data.quantity || 0), data.dose || null, data.duration || null, data.instructions || null],
+  );
+}
+
+async function replaceResource(user, resource, body, req) {
+  if (!stateKeys[resource] || !canWriteResource(user, resource)) {
+    return { status: 403, payload: { error: 'resource_write_forbidden' } };
+  }
+  if (!Array.isArray(body.records) || body.records.length > 5000) {
+    return { status: 400, payload: { error: 'records_must_be_an_array' } };
+  }
+  const clinics = (await pool.query("SELECT payload FROM app_records WHERE resource='clinics'")).rows.map((r) => r.payload);
+  const allowed = new Set(user.clinicRefs);
+  if (['clinics','projects','allocations','drug_catalog','pharmacy_stock'].includes(resource) && user.role !== 'system_admin') return { status: 403, payload: { error: 'system_admin_only' } };
+  const incoming = body.records;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const record of incoming) {
+      if (!record || typeof record !== 'object' || Array.isArray(record)) throw Object.assign(new Error('invalid_record'), { status: 400 });
+      const id = String(record.id || record.fileNo || record.code || record.employeeCode || '');
+      if (!id || id.length > 250) throw Object.assign(new Error('record_id_required'), { status: 400 });
+      const clinicRef = normalizedClinicRef(record, clinics) || null;
+      if (resource === 'pharmacy_stock' && user.role !== 'system_admin') throw Object.assign(new Error('system_admin_only'), { status: 403 });
+      if (user.role !== 'system_admin' && resource !== 'patients' && (!clinicRef || !allowed.has(clinicRef))) {
+        throw Object.assign(new Error('record_outside_user_clinic'), { status: 403 });
+      }
+      let normalizedRecord = record;
+      if (resource === 'patients' && user.role !== 'system_admin') {
+        const existing = await client.query('SELECT clinic_ref,payload FROM app_records WHERE resource=$1 AND record_id=$2 FOR UPDATE', [resource, id]);
+        const existingOwnVisit = (existing.rows[0]?.payload.visits || []).some((visit) => allowed.has(normalizedClinicRef(visit, clinics)));
+        if ((!clinicRef || !allowed.has(clinicRef)) && !existingOwnVisit) throw Object.assign(new Error('patient_outside_user_clinic'), { status: 403 });
+        const priorVisitIds = new Set((existing.rows[0]?.payload.visits || []).map((visit) => String(visit.id || visit.date)));
+        for (const visit of Array.isArray(record.visits) ? record.visits : []) {
+          const visitId = String(visit.id || visit.date || '');
+          if (!allowed.has(normalizedClinicRef(visit, clinics)) && !priorVisitIds.has(visitId)) throw Object.assign(new Error('visit_outside_user_clinic'), { status: 403 });
+        }
+        if (existing.rows[0]) {
+          const retainedVisits = (existing.rows[0].payload.visits || []).filter((visit) => !allowed.has(normalizedClinicRef(visit, clinics)));
+          const merged = new Map(retainedVisits.map((visit) => [String(visit.id || visit.date), visit]));
+          for (const visit of Array.isArray(record.visits) ? record.visits : []) {
+            const visitId = String(visit.id || visit.date || '');
+            if (allowed.has(normalizedClinicRef(visit, clinics)) || !merged.has(visitId)) merged.set(visitId, visit);
+          }
+          normalizedRecord = { ...record, visits: [...merged.values()].sort((a, b) => new Date(b.date) - new Date(a.date)) };
+        }
+      }
+      if (user.role !== 'system_admin' && ['projects','allocations','clinics','drug_catalog','pharmacy_stock'].includes(resource)) {
+        throw Object.assign(new Error('system_admin_only'), { status: 403 });
+      }
+      const patientId = resource === 'patients' ? null : await lookupPatientId(client, normalizedRecord, resource);
+      const storedRecord = resource === 'patients' ? { ...normalizedRecord } : normalizedRecord;
+      if (resource === 'patients') { delete storedRecord.nationalId; delete storedRecord.nationalTail; }
+      if (resource === 'queue' && storedRecord.nationalId) {
+        storedRecord.nationalIdMasked = `••••${String(storedRecord.nationalId).slice(-4)}`;
+        delete storedRecord.nationalId;
+      }
+      await client.query(
+        `INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,updated_by)
+         VALUES($1,$2,$3,$4,$5::jsonb,$6)
+         ON CONFLICT(resource,record_id) DO UPDATE SET clinic_ref=EXCLUDED.clinic_ref,patient_id=EXCLUDED.patient_id,
+           payload=EXCLUDED.payload,version=app_records.version+1,updated_by=EXCLUDED.updated_by,updated_at=now()`,
+        [resource, id, clinicRef, patientId, JSON.stringify(storedRecord), user.id],
+      );
+      await syncNormalized(client, resource, normalizedRecord, id);
+    }
+    for (const rawId of ['patients','visits'].includes(resource) ? [] : Array.isArray(body.deletedIds) ? body.deletedIds.slice(0, 5000) : []) {
+      const id = String(rawId);
+      const existing = await client.query('SELECT clinic_ref FROM app_records WHERE resource=$1 AND record_id=$2 FOR UPDATE', [resource, id]);
+      if (!existing.rowCount) continue;
+      if (user.role !== 'system_admin' && !allowed.has(existing.rows[0].clinic_ref)) throw Object.assign(new Error('record_outside_user_clinic'), { status: 403 });
+      if (resource === 'clinics' && user.role !== 'system_admin') throw Object.assign(new Error('system_admin_only'), { status: 403 });
+      await client.query('DELETE FROM app_records WHERE resource=$1 AND record_id=$2', [resource, id]);
+    }
+    await audit({ actorId: user.id, action: 'records.replace', entityType: resource, requestId: req.id, details: { count: incoming.length } });
+    await client.query('COMMIT');
+    return { status: 200, payload: { ok: true, count: incoming.length } };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function lookupPatientId(client, record, resource) {
+  const patientNumber = resource === 'patients' ? '' : String(record.fileNo || record.patientNumber || '');
+  if (!patientNumber) return null;
+  const { rows } = await client.query('SELECT id FROM patients WHERE patient_number=$1', [patientNumber]);
+  return rows[0]?.id || null;
+}
+
+async function bootstrapAdmin() {
+  const username = requiredEnv('ADMIN_USERNAME').trim().toLowerCase();
+  const password = requiredEnv('ADMIN_PASSWORD', 12);
+  const displayName = process.env.ADMIN_DISPLAY_NAME?.trim() || 'مدير النظام';
+  const found = await pool.query('SELECT id FROM app_users WHERE username=$1', [username]);
+  if (found.rowCount) return;
+  await pool.query(
+    `INSERT INTO app_users(username,password_hash,display_name,role) VALUES($1,$2,$3,'system_admin')`,
+    [username, await hashPassword(password), displayName],
+  );
+  console.log(`Bootstrapped system administrator: ${username}`);
+}
+
+function loginRateLimited(ip) {
+  const now = Date.now();
+  const current = authFailures.get(ip) || { count: 0, until: now + 10 * 60_000 };
+  if (current.until <= now) { current.count = 0; current.until = now + 10 * 60_000; }
+  authFailures.set(ip, current);
+  return current.count >= 10;
+}
+
+async function handleApi(req, res, url) {
+  if (!assertSameOrigin(req, res)) return;
+  const requestId = randomUUID();
+  req.id = requestId;
+  if (req.method === 'GET' && url.pathname === '/api/v1/health') {
+    await pool.query('SELECT 1');
+    return send(res, 200, { status: 'ok', apiVersion: 'v1', database: 'connected', requestId });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/auth/login') {
+    const ip = req.socket.remoteAddress || 'unknown';
+    if (loginRateLimited(ip)) return send(res, 429, { error: 'login_rate_limited' }, { 'Retry-After': '600' });
+    const body = await readJson(req);
+    const username = String(body.username || '').trim().toLowerCase();
+    const password = String(body.password || '');
+    const { rows } = await pool.query('SELECT id,username,password_hash,display_name,role,active FROM app_users WHERE username=$1', [username]);
+    const user = rows[0];
+    if (!user || !user.active || !(await verifyPassword(password, user.password_hash))) {
+      const item = authFailures.get(ip) || { count: 0, until: Date.now() + 10 * 60_000 };
+      item.count += 1; authFailures.set(ip, item);
+      await audit({ action: 'auth.login.failed', sourceSystem: 'web', requestId, details: { username } });
+      return send(res, 401, { error: 'invalid_credentials', requestId });
+    }
+    authFailures.delete(ip);
+    const token = opaqueToken();
+    const expiresAt = new Date(Date.now() + sessionDurationMs);
+    await pool.query('INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)', [sessionHash(token), user.id, expiresAt]);
+    const clinics = await pool.query('SELECT clinic_ref FROM user_clinic_refs WHERE user_id=$1 ORDER BY clinic_ref', [user.id]);
+    await audit({ actorId: user.id, action: 'auth.login.success', sourceSystem: 'web', requestId });
+    return send(res, 200, { user: { id: user.id, username: user.username, displayName: user.display_name, role: user.role, clinicRefs: clinics.rows.map((c) => c.clinic_ref) }, requestId }, {
+      'Set-Cookie': `phc_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(sessionDurationMs / 1000)}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`,
+    });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/integrations/token') {
+    const ip = req.socket.remoteAddress || 'unknown';
+    if (loginRateLimited(ip)) return send(res, 429, { error: 'integration_auth_rate_limited', requestId }, { 'Retry-After': '600' });
+    const body = await readJson(req);
+    const clientId = String(body.clientId || '').trim();
+    const clientSecret = String(body.clientSecret || '');
+    const result = await pool.query('SELECT id,client_id,secret_hash,scopes FROM integration_clients WHERE client_id=$1 AND enabled=true', [clientId]);
+    if (!result.rows[0] || !(await verifyPassword(clientSecret, result.rows[0].secret_hash))) {
+      const failure = authFailures.get(ip) || { count: 0, until: Date.now() + 10 * 60_000 };
+      failure.count += 1; authFailures.set(ip, failure);
+      await audit({ action: 'integration.token.failed', sourceSystem: clientId.slice(0, 100), requestId });
+      return send(res, 401, { error: 'invalid_client_credentials', requestId });
+    }
+    authFailures.delete(ip);
+    const accessToken = opaqueToken();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    await pool.query('INSERT INTO integration_access_tokens(token_hash,client_id,scopes,expires_at) VALUES($1,$2,$3,$4)', [tokenHash(accessToken), result.rows[0].id, result.rows[0].scopes, expiresAt]);
+    await audit({ action: 'integration.token.issued', sourceSystem: clientId, requestId });
+    return send(res, 200, { accessToken, tokenType: 'Bearer', expiresIn: 3600, scopes: result.rows[0].scopes, requestId }, { 'Cache-Control': 'no-store' });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/auth/logout') {
+    const token = cookieValue(req.headers.cookie, 'phc_session');
+    if (token) await pool.query('DELETE FROM user_sessions WHERE token_hash=$1', [sessionHash(token)]);
+    return send(res, 200, { ok: true }, { 'Set-Cookie': 'phc_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0' });
+  }
+  const user = await currentUser(req);
+  const integration = await currentIntegration(req);
+  if (req.method === 'GET' && url.pathname === '/api/v1/auth/session') {
+    if (!user) return send(res, 401, { error: 'authentication_required', requestId });
+    delete user.token_hash;
+    return send(res, 200, { user, requestId });
+  }
+  if (!user && !integration) return send(res, 401, { error: 'authentication_required', requestId });
+  if (req.method === 'GET' && url.pathname === '/api/v1/state') {
+    if (!user) return send(res, 403, { error: 'human_session_required', requestId });
+    return send(res, 200, await loadState(user));
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/integrations/clients') {
+    if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
+    const body = await readJson(req);
+    const name = String(body.name || '').trim();
+    const scopes = [...new Set(Array.isArray(body.scopes) ? body.scopes.map((scope) => String(scope).trim()).filter((scope) => /^[a-z][a-z0-9:._-]{1,63}$/.test(scope)) : [])];
+    if (!name || name.length > 160 || !scopes.length || scopes.length > 20) return send(res, 400, { error: 'invalid_integration_client', requestId });
+    const clientId = `prcs_${opaqueToken(18)}`;
+    const clientSecret = opaqueToken(36);
+    const created = await pool.query('INSERT INTO integration_clients(client_id,secret_hash,name,scopes) VALUES($1,$2,$3,$4) RETURNING id,client_id,name,scopes,enabled,created_at', [clientId, await hashPassword(clientSecret), name, scopes]);
+    await audit({ actorId: user.id, action: 'integration.client.created', entityType: 'integration_client', entityId: created.rows[0].id, sourceSystem: clientId, requestId, details: { scopes } });
+    return send(res, 201, { client: created.rows[0], clientSecret, requestId }, { 'Cache-Control': 'no-store' });
+  }
+  if (url.pathname === '/api/v1/integrations/clients' && req.method === 'GET') {
+    if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
+    const { rows } = await pool.query('SELECT id,client_id,name,scopes,enabled,created_at,last_used_at FROM integration_clients ORDER BY created_at DESC LIMIT 500');
+    return send(res, 200, { clients: rows, requestId });
+  }
+  const revokeClient = /^\/api\/v1\/integrations\/clients\/([^/]+)\/revoke$/.exec(url.pathname);
+  if (revokeClient && req.method === 'POST') {
+    if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
+    const result = await pool.query('UPDATE integration_clients SET enabled=false WHERE client_id=$1 RETURNING id,client_id,enabled', [decodeURIComponent(revokeClient[1])]);
+    if (!result.rowCount) return send(res, 404, { error: 'integration_client_not_found', requestId });
+    await pool.query('DELETE FROM integration_access_tokens WHERE client_id=$1', [result.rows[0].id]);
+    await audit({ actorId: user.id, action: 'integration.client.revoked', entityType: 'integration_client', entityId: result.rows[0].id, sourceSystem: result.rows[0].client_id, requestId });
+    return send(res, 200, { client: result.rows[0], requestId });
+  }
+  if (!user && !['/api/v1/interop/identity-map', '/api/v1/patients/lookup'].includes(url.pathname)) {
+    return send(res, 403, { error: 'human_session_required', requestId });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/audit/view') {
+    const body = await readJson(req);
+    if (body.entityType !== 'patient' || !String(body.entityId || '').trim()) return send(res, 400, { error: 'invalid_audit_event' });
+    const record = await pool.query("SELECT clinic_ref,payload FROM app_records WHERE resource='patients' AND record_id=$1", [String(body.entityId)]);
+    if (!record.rowCount) return send(res, 404, { error: 'patient_not_found' });
+    if (user.role !== 'system_admin') {
+      const clinics = (await pool.query("SELECT payload FROM app_records WHERE resource='clinics'")).rows.map((row) => row.payload);
+      const ownVisit = (record.rows[0].payload.visits || []).some((visit) => user.clinicRefs.includes(normalizedClinicRef(visit, clinics)));
+      if (!ownVisit && !user.clinicRefs.includes(String(record.rows[0].clinic_ref || ''))) return send(res, 403, { error: 'patient_outside_user_clinic' });
+    }
+    await audit({ actorId: user.id, action: 'patient.view', entityType: 'patient', entityId: String(body.entityId), requestId });
+    return send(res, 200, { ok: true, requestId });
+  }
+  if (req.method === 'PUT' && url.pathname.startsWith('/api/v1/records/')) {
+    const resource = decodeURIComponent(url.pathname.split('/').at(-1));
+    const result = await replaceResource(user, resource, await readJson(req), req);
+    return send(res, result.status, result.payload);
+  }
+  if (req.method === 'GET' && url.pathname === '/api/v1/interop/identity-map') {
+    if (user ? !['system_admin', 'clinic_admin'].includes(user.role) : !hasScope(integration, 'identity-map:read')) return send(res, 403, { error: 'forbidden' });
+    const { rows } = await pool.query(
+      `SELECT m.entity_type,m.local_id,m.external_id,m.external_version,m.last_synced_at,s.code AS source_system
+         FROM integration_identity_map m JOIN integration_systems s ON s.id=m.system_id
+        ORDER BY s.code,m.entity_type,m.local_id LIMIT 1000`,
+    );
+    return send(res, 200, { data: rows, requestId });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/interop/identity-map') {
+    if (user ? user.role !== 'system_admin' : !hasScope(integration, 'identity-map:write')) return send(res, 403, { error: 'identity_map_write_forbidden' });
+    const body = await readJson(req);
+    const sourceCode = String(body.sourceSystem || '').trim().toLowerCase();
+    const sourceName = String(body.sourceName || sourceCode).trim();
+    const entityType = String(body.entityType || '').trim().toLowerCase();
+    const localId = String(body.localId || '').trim();
+    const externalId = String(body.externalId || '').trim();
+    if (!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(sourceCode) || !/^[a-z][a-z0-9._-]{1,63}$/.test(entityType) || !localId || !externalId || localId.length > 250 || externalId.length > 250) {
+      return send(res, 400, { error: 'invalid_identity_map' });
+    }
+    try {
+      const source = await pool.query('INSERT INTO integration_systems(code,name) VALUES($1,$2) ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name RETURNING id', [sourceCode, sourceName]);
+      const mapped = await pool.query(
+        `INSERT INTO integration_identity_map(system_id,entity_type,local_id,external_id,external_version,last_synced_at,metadata)
+         VALUES($1,$2,$3,$4,$5,now(),$6::jsonb)
+         ON CONFLICT(system_id,entity_type,local_id) DO UPDATE SET external_id=EXCLUDED.external_id,external_version=EXCLUDED.external_version,last_synced_at=now(),metadata=EXCLUDED.metadata
+         RETURNING id,entity_type,local_id,external_id,external_version,last_synced_at`,
+        [source.rows[0].id, entityType, localId, externalId, String(body.externalVersion || '') || null, JSON.stringify(body.metadata || {})],
+      );
+      await audit({ actorId: user?.id || null, action: 'interop.identity_map.upsert', entityType, entityId: localId, sourceSystem: sourceCode, requestId, details: { integrationClient: integration?.clientId || null } });
+      return send(res, 200, { mapping: mapped.rows[0], sourceSystem: sourceCode, requestId });
+    } catch (error) {
+      if (error.code === '23505') return send(res, 409, { error: 'external_id_already_mapped' });
+      throw error;
+    }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/v1/users') {
+    if (user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required' });
+    const { rows } = await pool.query(
+      `SELECT u.id,u.username,u.display_name AS "displayName",u.role,u.active,u.created_at,
+              COALESCE(array_agg(c.clinic_ref) FILTER (WHERE c.clinic_ref IS NOT NULL),'{}') AS "clinicRefs"
+         FROM app_users u LEFT JOIN user_clinic_refs c ON c.user_id=u.id
+        GROUP BY u.id ORDER BY u.created_at DESC LIMIT 500`,
+    );
+    return send(res, 200, { users: rows, requestId });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/users') {
+    if (user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required' });
+    const body = await readJson(req);
+    const username = String(body.username || '').trim().toLowerCase();
+    const password = String(body.password || '');
+    const role = String(body.role || '');
+    const displayName = String(body.displayName || '').trim();
+    const clinicRefs = Array.isArray(body.clinicRefs) ? [...new Set(body.clinicRefs.map(String))] : [];
+    if (!/^[a-z0-9._-]{3,64}$/.test(username) || password.length < 12 || !displayName || !['clinic_admin','clinician','reception','pharmacist','lab_technician','viewer'].includes(role)) {
+      return send(res, 400, { error: 'invalid_user_data', requirements: { username: '3-64 lowercase letters, digits, dot, underscore or hyphen', password: '12+ characters' } });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const created = await client.query('INSERT INTO app_users(username,password_hash,display_name,role) VALUES($1,$2,$3,$4) RETURNING id,username,display_name,role', [username, await hashPassword(password), displayName, role]);
+      const validClinics = new Set((await client.query("SELECT record_id FROM app_records WHERE resource='clinics'")).rows.map((r) => r.record_id));
+      for (const clinicRef of clinicRefs) {
+        if (!validClinics.has(clinicRef)) throw Object.assign(new Error('unknown_clinic'), { status: 400 });
+        await client.query('INSERT INTO user_clinic_refs(user_id,clinic_ref) VALUES($1,$2)', [created.rows[0].id, clinicRef]);
+      }
+      await audit({ actorId: user.id, action: 'user.created', entityType: 'user', entityId: created.rows[0].id, requestId, details: { role } });
+      await client.query('COMMIT');
+      return send(res, 201, { user: created.rows[0], clinicRefs });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if (error.code === '23505') return send(res, 409, { error: 'username_already_exists' });
+      throw error;
+    } finally { client.release(); }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/v1/patients/lookup') {
+    if (!user && !hasScope(integration, 'patients:lookup')) return send(res, 403, { error: 'patient_lookup_forbidden', requestId });
+    const nationalId = String(url.searchParams.get('nationalId') || '').replace(/\D/g, '');
+    if (nationalId.length < 6 || nationalId.length > 20) return send(res, 400, { error: 'invalid_national_id' });
+    const { rows } = await pool.query(
+      `SELECT p.id,p.patient_number,p.full_name,p.national_id_ciphertext,p.date_of_birth,p.gender,p.phone,p.alternate_phone,p.address,
+              v.visit_number,v.clinical_data->>'id' AS source_visit_id,v.occurred_at,v.status,s.name AS service,c.name AS clinic
+         FROM patients p
+         LEFT JOIN LATERAL (SELECT * FROM visits WHERE patient_id=p.id ORDER BY occurred_at DESC LIMIT 1) v ON true
+         LEFT JOIN clinics c ON c.id=v.clinic_id
+         LEFT JOIN service_catalog s ON s.id=v.service_id
+        WHERE p.national_id_hash=$1 LIMIT 1`, [hashNationalId(nationalId)],
+    );
+    if (!rows[0]) return send(res, 404, { error: 'patient_not_found' });
+    const row = rows[0];
+    await audit({ actorId: user?.id || null, action: 'patient.lookup', entityType: 'patient', entityId: row.patient_number, sourceSystem: integration?.clientId || null, requestId, details: { purpose: user ? 'reception_search' : 'authorized_integration' } });
+    return send(res, 200, { patient: {
+      id: row.id, fileNo: row.patient_number, name: row.full_name, nationalId: decryptNationalId(row.national_id_ciphertext),
+      dateOfBirth: row.date_of_birth, gender: row.gender, phone: row.phone, alternatePhone: row.alternate_phone,
+      address: row.address, clinic: row.clinic || '', clinicId: user?.clinicRefs?.[0] || '', visits: row.visit_number ? [{ id: row.source_visit_id || row.visit_number, date: row.occurred_at, clinic: row.clinic, service: row.service, status: row.status, type: 'آخر زيارة' }] : [],
+    }, requestId });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/pharmacy/dispense') {
+    if (!['system_admin','clinic_admin','pharmacist'].includes(user.role)) return send(res, 403, { error: 'pharmacist_role_required' });
+    const body = await readJson(req);
+    if (!Array.isArray(body.items) || !body.items.length || body.items.length > 30) return send(res, 400, { error: 'invalid_dispense_items' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const clinic = await client.query("SELECT record_id,payload FROM app_records WHERE resource='clinics' AND (record_id=$1 OR payload->>'name'=$1 OR payload->>'code'=$1) LIMIT 1", [String(body.clinic || '')]);
+      if (!clinic.rows[0]) throw Object.assign(new Error('clinic_not_found'), { status: 404 });
+      const clinicRef = clinic.rows[0].record_id;
+      if (user.role !== 'system_admin' && !user.clinicRefs.includes(clinicRef)) throw Object.assign(new Error('clinic_scope_forbidden'), { status: 403 });
+      if (user.role === 'clinic_admin' && !user.clinicRefs.includes(clinicRef)) throw Object.assign(new Error('clinic_scope_forbidden'), { status: 403 });
+      const patientResult = await client.query("SELECT record_id,clinic_ref,payload FROM app_records WHERE resource='patients' AND record_id=$1 FOR UPDATE", [String(body.fileNo || '')]);
+      if (!patientResult.rows[0]) throw Object.assign(new Error('patient_not_found'), { status: 404 });
+      const patient = patientResult.rows[0].payload;
+      if (user.role !== 'system_admin') {
+        const clinics = (await client.query("SELECT payload FROM app_records WHERE resource='clinics'")).rows.map((row) => row.payload);
+        const hasClinicHistory = (patient.visits || []).some((visit) => normalizedClinicRef(visit, clinics) === clinicRef);
+        if (!hasClinicHistory && patientResult.rows[0].clinic_ref !== clinicRef) throw Object.assign(new Error('patient_outside_user_clinic'), { status: 403 });
+      }
+      const stockChanges = [];
+      const newDispenses = [];
+      const now = new Date().toISOString();
+      const visitId = `visit-${randomUUID()}`;
+      const medications = [];
+      for (const item of body.items) {
+        const quantity = Number(item.quantity);
+        if (!Number.isInteger(quantity) || quantity < 1 || !String(item.dose || '').trim()) throw Object.assign(new Error('invalid_quantity_or_dose'), { status: 400 });
+        const stockResult = await client.query("SELECT record_id,clinic_ref,payload FROM app_records WHERE resource='pharmacy_stock' AND record_id=$1 FOR UPDATE", [String(item.stockId || '')]);
+        const stockRow = stockResult.rows[0];
+        if (!stockRow || stockRow.clinic_ref !== clinicRef) throw Object.assign(new Error('stock_not_available_in_clinic'), { status: 409 });
+        const stock = stockRow.payload;
+        if (quantity > Number(stock.quantity || 0)) throw Object.assign(new Error('insufficient_stock'), { status: 409 });
+        const drug = (await client.query("SELECT payload FROM app_records WHERE resource='drug_catalog' AND record_id=$1", [String(stock.drugId)])).rows[0]?.payload;
+        if (!drug) throw Object.assign(new Error('drug_not_found'), { status: 404 });
+        const updated = { ...stock, quantity: Number(stock.quantity) - quantity };
+        await client.query('UPDATE app_records SET payload=$3::jsonb,version=version+1,updated_by=$4,updated_at=now() WHERE resource=$1 AND record_id=$2', ['pharmacy_stock', stockRow.record_id, JSON.stringify(updated), user.id]);
+        stockChanges.push(updated);
+        const med = { name: `${drug.name} · ${stock.strength || ''}`.trim(), dose: String(item.dose), duration: String(item.duration || 'حسب الوصفة'), quantity: `${quantity} ${stock.unit || ''}`.trim() };
+        medications.push(med);
+        newDispenses.push({ id: `disp-${randomUUID()}`, date: now, patientName: patient.name, fileNo: patient.fileNo, drugName: drug.name, strength: stock.strength || '', quantity, unit: stock.unit || '', clinic: clinic.rows[0].payload.name, clinicId: clinicRef, visitId, stockId: stockRow.record_id, dose: String(item.dose), duration: String(item.duration || ''), instructions: String(body.instructions || '') });
+        const normalizedStock = await client.query('SELECT id FROM pharmacy_stock WHERE source_record_id=$1 FOR UPDATE', [stockRow.record_id]);
+        if (normalizedStock.rows[0]) await client.query('UPDATE pharmacy_stock SET quantity=$2,updated_at=now() WHERE id=$1', [normalizedStock.rows[0].id, updated.quantity]);
+      }
+      const visit = {
+        id: visitId, date: now, clinic: clinic.rows[0].payload.name, clinicId: clinicRef, service: 'صيدلية وصرف أدوية',
+        type: 'صرف أدوية', status: 'مكتملة', provider: user.displayName, complaint: 'صرف أدوية من مخزون الصيدلية.',
+        assessment: 'تم التحقق من المريض والأرصدة قبل الصرف.', plan: String(body.instructions || '').trim() || 'الالتزام بالجرعات والمدد المحددة لكل دواء.',
+        vitals: {}, medications, procedures: ['صرف أدوية من الصيدلية'], referral: 'لا توجد إحالة مسجلة.',
+      };
+      const allClinics = (await client.query("SELECT payload FROM app_records WHERE resource='clinics'")).rows.map((row) => row.payload);
+      const retainedVisits = user.role === 'system_admin' ? (patient.visits || []) : (patient.visits || []).filter((prior) => user.clinicRefs.includes(normalizedClinicRef(prior, allClinics)));
+      const updatedPatient = { ...patient, clinic: visit.clinic, clinicId: clinicRef, visits: [...retainedVisits, visit] };
+      await client.query('UPDATE app_records SET clinic_ref=$3,payload=$4::jsonb,version=version+1,updated_by=$5,updated_at=now() WHERE resource=$1 AND record_id=$2', ['patients', patientResult.rows[0].record_id, clinicRef, JSON.stringify(updatedPatient), user.id]);
+      await client.query("INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by) VALUES('visits',$1,$2,NULL,$3::jsonb,$4,$4) ON CONFLICT(resource,record_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now()", [visitId, clinicRef, JSON.stringify({ ...visit, fileNo: patient.fileNo }), user.id]);
+      for (const dispense of newDispenses) {
+        await client.query("INSERT INTO app_records(resource,record_id,clinic_ref,payload,created_by,updated_by) VALUES('dispenses',$1,$2,$3::jsonb,$4,$4) ON CONFLICT(resource,record_id) DO NOTHING", [dispense.id, clinicRef, JSON.stringify(dispense), user.id]);
+      }
+      await syncNormalized(client, 'patients', updatedPatient, patient.fileNo);
+      const typedVisit = await client.query('SELECT id FROM visits WHERE visit_number=$1', [`${patient.fileNo}:${visitId}`]);
+      if (typedVisit.rows[0]) await client.query('UPDATE visits SET created_by=$2 WHERE id=$1', [typedVisit.rows[0].id, user.id]);
+      for (const dispense of newDispenses) await syncNormalized(client, 'dispenses', dispense, dispense.id);
+      await audit({ actorId: user.id, clinicRef, action: 'pharmacy.dispense', entityType: 'visit', entityId: visitId, requestId, details: { fileNo: patient.fileNo, itemCount: newDispenses.length } });
+      await client.query('COMMIT');
+      return send(res, 201, { visit, patient: updatedPatient, stocks: stockChanges, dispenses: newDispenses, requestId });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+  }
+  return send(res, 404, { error: 'not_found', requestId });
+}
+
+function contentType(path) {
+  const extension = extname(path).toLowerCase();
+  return ({ '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' })[extension] || 'application/octet-stream';
+}
+
+async function serveStatic(req, res, url) {
+  if (!['GET', 'HEAD'].includes(req.method)) return send(res, 405, { error: 'method_not_allowed' });
+  const requested = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname.slice(1));
+  const safe = normalize(requested).replace(/^([.][.][/\\])+/, '');
+  const path = join(root, safe);
+  if (!path.startsWith(root)) return send(res, 403, { error: 'forbidden' });
+  try {
+    const info = await stat(path);
+    if (!info.isFile()) return send(res, 404, { error: 'not_found' });
+    res.writeHead(200, {
+      'Content-Type': contentType(path), 'Content-Length': info.size,
+      'Cache-Control': path.endsWith('index.html') ? 'no-store' : 'public, max-age=86400',
+      'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    });
+    if (req.method === 'HEAD') return res.end();
+    createReadStream(path).pipe(res);
+  } catch { return send(res, 404, { error: 'not_found' }); }
+}
+
+async function main() {
+  requiredEnv('DATABASE_URL');
+  requiredEnv('SESSION_SECRET', 32);
+  requiredEnv('DATA_ENCRYPTION_KEY', 64);
+  requiredEnv('DATA_LOOKUP_KEY', 64);
+  await pool.query('SELECT 1');
+  await bootstrapAdmin();
+  const server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
+      else await serveStatic(req, res, url);
+    } catch (error) {
+      console.error('request failed', { message: error.message, code: error.code });
+      if (!res.headersSent) send(res, error.status || 500, { error: error.status ? error.message : 'internal_error' });
+      else res.destroy();
+    }
+  });
+  const port = Number(process.env.PORT || 8080);
+  server.listen(port, '0.0.0.0', () => console.log(`PHC application listening on ${port}`));
+  const close = async () => { server.close(); await pool.end(); process.exit(0); };
+  process.on('SIGTERM', close);
+  process.on('SIGINT', close);
+}
+
+main().catch((error) => { console.error('Startup failed:', error.message); process.exit(1); });
