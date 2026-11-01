@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createHmac, randomUUID } from 'node:crypto';
 import { pool, audit } from './db.js';
 import { hashPassword, verifyPassword, opaqueToken, tokenHash, encryptNationalId, decryptNationalId, hashNationalId } from './security.js';
+import { seedDemoData } from './demo-data.js';
 
 const root = fileURLToPath(new URL('../public/', import.meta.url));
 const sessionDurationMs = 8 * 60 * 60 * 1000;
@@ -873,6 +874,7 @@ async function main() {
   requiredEnv('DATA_ENCRYPTION_KEY', 64);
   requiredEnv('DATA_LOOKUP_KEY', 64);
   await pool.query('SELECT 1');
+  if (await seedDemoData(pool, syncNormalized)) console.log('Loaded clearly labeled demo records');
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
