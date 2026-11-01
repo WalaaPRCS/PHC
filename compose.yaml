@@ -31,8 +31,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "${PORT:-8080}:8080"
+    expose:
+      - "8080"
     volumes:
       - phc-runtime-secrets:/run/phc-secrets:ro
     networks: [internal]
