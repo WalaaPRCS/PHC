@@ -1,13 +1,36 @@
 services:
+  init-secrets:
+    image: alpine:3.22
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        umask 077
+        for name in postgres_password session_secret data_encryption_key data_lookup_key; do
+          file="/run/phc-secrets/$name"
+          if [ ! -s "$file" ]; then
+            od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$file.tmp"
+            mv "$file.tmp" "$file"
+          fi
+        done
+        chown 1000:1000 /run/phc-secrets/*
+        chmod 0400 /run/phc-secrets/*
+    volumes:
+      - phc-runtime-secrets:/run/phc-secrets
+    networks: [internal]
   db:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-}
-      POSTGRES_USER: ${POSTGRES_USER:-}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: phc
+      POSTGRES_USER: phc_app
     volumes:
       - phc-postgres:/var/lib/postgresql/data
+      - phc-runtime-secrets:/run/phc-secrets:ro
+    entrypoint: ["/bin/sh", "-ec", "export POSTGRES_PASSWORD=\"$(cat /run/phc-secrets/postgres_password)\"; exec docker-entrypoint.sh postgres"]
+    depends_on:
+      init-secrets:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
@@ -20,22 +43,24 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: ${PORT:-8080}
-      DATABASE_URL: postgres://${POSTGRES_USER:-}:${POSTGRES_PASSWORD:-}@db:5432/${POSTGRES_DB:-}
       DB_POOL_SIZE: ${DB_POOL_SIZE:-15}
-      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
-      ADMIN_DISPLAY_NAME: ${ADMIN_DISPLAY_NAME:-مدير النظام}
-      SESSION_SECRET: ${SESSION_SECRET:-}
-      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:-}
-      DATA_LOOKUP_KEY: ${DATA_LOOKUP_KEY:-}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: phc
+      DB_USER: phc_app
     depends_on:
+      init-secrets:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
     ports:
       - "${PORT:-8080}:8080"
+    volumes:
+      - phc-runtime-secrets:/run/phc-secrets:ro
     networks: [internal]
 volumes:
   phc-postgres:
+  phc-runtime-secrets:
 networks:
   internal:
     internal: true

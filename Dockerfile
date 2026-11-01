@@ -6,6 +6,8 @@ RUN npm ci --omit=dev
 COPY src ./src
 COPY db ./db
 COPY public ./public
+COPY docker/start-app.sh /usr/local/bin/start-app
+RUN chmod 0555 /usr/local/bin/start-app
 EXPOSE 8080
 USER node
-CMD ["npm", "start"]
+ENTRYPOINT ["/usr/local/bin/start-app"]

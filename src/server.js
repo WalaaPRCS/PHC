@@ -4,13 +4,10 @@ import { stat } from 'node:fs/promises';
 import { join, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHmac, randomUUID } from 'node:crypto';
-import { promisify } from 'node:util';
-import { scrypt as scryptCallback } from 'node:crypto';
 import { pool, audit } from './db.js';
 import { hashPassword, verifyPassword, opaqueToken, tokenHash, encryptNationalId, decryptNationalId, hashNationalId } from './security.js';
 
 const root = fileURLToPath(new URL('../public/', import.meta.url));
-const scrypt = promisify(scryptCallback);
 const sessionDurationMs = 8 * 60 * 60 * 1000;
 const maxBodyBytes = 1_000_000;
 const stateKeys = {
@@ -508,19 +505,6 @@ async function lookupPatientId(client, record, resource) {
   return rows[0]?.id || null;
 }
 
-async function bootstrapAdmin() {
-  const username = requiredEnv('ADMIN_USERNAME').trim().toLowerCase();
-  const password = requiredEnv('ADMIN_PASSWORD', 12);
-  const displayName = process.env.ADMIN_DISPLAY_NAME?.trim() || 'مدير النظام';
-  const found = await pool.query('SELECT id FROM app_users WHERE username=$1', [username]);
-  if (found.rowCount) return;
-  await pool.query(
-    `INSERT INTO app_users(username,password_hash,display_name,role) VALUES($1,$2,$3,'system_admin')`,
-    [username, await hashPassword(password), displayName],
-  );
-  console.log(`Bootstrapped system administrator: ${username}`);
-}
-
 function loginRateLimited(ip) {
   const now = Date.now();
   const current = authFailures.get(ip) || { count: 0, until: now + 10 * 60_000 };
@@ -536,6 +520,49 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/v1/health') {
     await pool.query('SELECT 1');
     return send(res, 200, { status: 'ok', apiVersion: 'v1', database: 'connected', requestId });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/v1/setup/status') {
+    const { rows } = await pool.query('SELECT EXISTS(SELECT 1 FROM app_users) AS initialized');
+    return send(res, 200, { needsSetup: !rows[0].initialized, requestId });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/setup/admin') {
+    const ip = req.socket.remoteAddress || 'unknown';
+    if (loginRateLimited(ip)) return send(res, 429, { error: 'setup_rate_limited', requestId }, { 'Retry-After': '600' });
+    const body = await readJson(req);
+    const username = String(body.username || '').trim().toLowerCase();
+    const displayName = String(body.displayName || '').trim();
+    const password = String(body.password || '');
+    if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(username) || displayName.length < 2 || displayName.length > 150 || password.length < 12 || password.length > 256) {
+      return send(res, 400, { error: 'invalid_initial_admin', requestId });
+    }
+    const passwordHash = await hashPassword(password);
+    const token = opaqueToken();
+    const expiresAt = new Date(Date.now() + sessionDurationMs);
+    const client = await pool.connect();
+    let created;
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(734921045)');
+      const { rows } = await client.query('SELECT EXISTS(SELECT 1 FROM app_users) AS initialized');
+      if (rows[0].initialized) {
+        await client.query('ROLLBACK');
+        return send(res, 409, { error: 'system_already_initialized', requestId });
+      }
+      created = await client.query(
+        `INSERT INTO app_users(username,password_hash,display_name,role) VALUES($1,$2,$3,'system_admin') RETURNING id,username,display_name,role`,
+        [username, passwordHash, displayName],
+      );
+      await client.query('INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)', [sessionHash(token), created.rows[0].id, expiresAt]);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+    authFailures.delete(ip);
+    await audit({ actorId: created.rows[0].id, action: 'auth.first_admin.created', sourceSystem: 'web', requestId });
+    return send(res, 201, { user: { id: created.rows[0].id, username: created.rows[0].username, displayName: created.rows[0].display_name, role: created.rows[0].role, clinicRefs: [] }, requestId }, {
+      'Set-Cookie': `phc_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(sessionDurationMs / 1000)}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`,
+    });
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/auth/login') {
     const ip = req.socket.remoteAddress || 'unknown';
@@ -846,7 +873,6 @@ async function main() {
   requiredEnv('DATA_ENCRYPTION_KEY', 64);
   requiredEnv('DATA_LOOKUP_KEY', 64);
   await pool.query('SELECT 1');
-  await bootstrapAdmin();
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);

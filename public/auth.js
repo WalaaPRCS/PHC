@@ -117,10 +117,21 @@
 
   async function initialize() {
     const form = document.getElementById('loginForm');
+    const setupForm = document.getElementById('setupForm');
     const username = document.getElementById('loginUsername');
     const password = document.getElementById('loginPassword');
     const button = document.getElementById('loginButton');
+    const setupButton = document.getElementById('setupButton');
     const logout = document.getElementById('logoutButton');
+    const gate = document.getElementById('loginGate');
+
+    function showGate(mode) {
+      gate.hidden = false;
+      setupForm.hidden = mode !== 'setup';
+      form.hidden = mode !== 'login';
+      (mode === 'setup' ? document.getElementById('setupDisplayName') : username)?.focus();
+    }
+
     form?.addEventListener('submit', async (event) => {
       event.preventDefault();
       const submit = button;
@@ -134,6 +145,35 @@
         showLoginError(error.status === 429 ? 'محاولات كثيرة. انتظر عشر دقائق ثم أعد المحاولة.' : 'اسم المستخدم أو كلمة المرور غير صحيحة، أو تعذر الاتصال بالخادم.');
       } finally { submit.disabled = false; }
     });
+    setupForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const errorBox = document.getElementById('setupError');
+      errorBox.hidden = true;
+      const displayName = document.getElementById('setupDisplayName').value.trim();
+      const adminUsername = document.getElementById('setupUsername').value.trim();
+      const adminPassword = document.getElementById('setupPassword').value;
+      const confirmation = document.getElementById('setupPasswordConfirm').value;
+      if (adminPassword !== confirmation) {
+        errorBox.textContent = 'كلمتا المرور غير متطابقتين.';
+        errorBox.hidden = false;
+        return;
+      }
+      setupButton.disabled = true;
+      try {
+        const result = await api('/setup/admin', { method: 'POST', body: JSON.stringify({ displayName, username: adminUsername, password: adminPassword }) });
+        document.getElementById('setupPassword').value = '';
+        document.getElementById('setupPasswordConfirm').value = '';
+        await authenticated(result.user);
+      } catch (error) {
+        if (error.status === 409) {
+          showGate('login');
+          showLoginError('تم إعداد النظام مسبقًا. سجّل الدخول بحساب مدير النظام.');
+        } else {
+          errorBox.textContent = error.status === 429 ? 'محاولات كثيرة. انتظر عشر دقائق ثم أعد المحاولة.' : error.status === 400 ? 'تحقق من اسم المستخدم وكلمة المرور (12 خانة على الأقل).' : 'تعذر إنشاء الحساب. تحقق من اتصال قاعدة البيانات ثم أعد المحاولة.';
+          errorBox.hidden = false;
+        }
+      } finally { setupButton.disabled = false; }
+    });
     logout?.addEventListener('click', async () => {
       await api('/auth/logout', { method: 'POST', body: '{}' }).catch(() => {});
       window.location.reload();
@@ -142,9 +182,15 @@
       const { user } = await api('/auth/session');
       await authenticated(user);
     } catch {
-      document.body.classList.remove('phc-auth-loading');
-      document.getElementById('loginGate').hidden = false;
-      username?.focus();
+      try {
+        const status = await api('/setup/status');
+        document.body.classList.remove('phc-auth-loading');
+        showGate(status.needsSetup ? 'setup' : 'login');
+      } catch {
+        document.body.classList.remove('phc-auth-loading');
+        showGate('login');
+        showLoginError('قاعدة البيانات غير متاحة حاليًا. أعد تحميل الصفحة بعد تشغيل الخدمة.');
+      }
     }
   }
 
