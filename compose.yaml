@@ -1,12 +1,4 @@
 services:
-  init-secrets:
-    image: alpine:3.22
-    restart: "no"
-    entrypoint: ["/bin/sh", "/run/init-secrets.sh"]
-    volumes:
-      - phc-runtime-secrets:/run/phc-secrets
-      - ./docker/init-secrets.sh:/run/init-secrets.sh:ro
-    networks: [internal]
   db:
     image: postgres:17-alpine
     restart: unless-stopped
@@ -15,16 +7,17 @@ services:
       POSTGRES_USER: phc_app
     volumes:
       - phc-postgres:/var/lib/postgresql/data
-      - phc-runtime-secrets:/run/phc-secrets:ro
-    entrypoint: ["/bin/sh", "-ec", "export POSTGRES_PASSWORD=\"$(cat /run/phc-secrets/postgres_password)\"; exec docker-entrypoint.sh postgres"]
-    depends_on:
-      init-secrets:
-        condition: service_completed_successfully
+      - phc-runtime-secrets:/run/phc-secrets
+      - ./docker/init-secrets.sh:/run/init-secrets.sh:ro
+      - ./docker/start-postgres.sh:/run/start-postgres.sh:ro
+    entrypoint: ["/bin/sh", "/run/start-postgres.sh"]
+    command: ["postgres"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 30s
     networks: [internal]
   app:
     build: .
@@ -38,8 +31,6 @@ services:
       DB_NAME: phc
       DB_USER: phc_app
     depends_on:
-      init-secrets:
-        condition: service_completed_successfully
       db:
         condition: service_healthy
     ports:
