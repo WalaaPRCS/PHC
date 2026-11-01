@@ -2,21 +2,10 @@ services:
   init-secrets:
     image: alpine:3.22
     restart: "no"
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        umask 077
-        for name in postgres_password session_secret data_encryption_key data_lookup_key; do
-          file="/run/phc-secrets/$name"
-          if [ ! -s "$file" ]; then
-            od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$file.tmp"
-            mv "$file.tmp" "$file"
-          fi
-        done
-        chown 1000:1000 /run/phc-secrets/*
-        chmod 0400 /run/phc-secrets/*
+    entrypoint: ["/bin/sh", "/run/init-secrets.sh"]
     volumes:
       - phc-runtime-secrets:/run/phc-secrets
+      - ./docker/init-secrets.sh:/run/init-secrets.sh:ro
     networks: [internal]
   db:
     image: postgres:17-alpine
