@@ -1,0 +1,6 @@
+FROM postgres:17-alpine
+COPY docker/init-secrets.sh /usr/local/bin/phc-init-secrets
+COPY docker/start-postgres.sh /usr/local/bin/phc-start-postgres
+RUN chmod 0555 /usr/local/bin/phc-init-secrets /usr/local/bin/phc-start-postgres
+ENTRYPOINT ["/usr/local/bin/phc-start-postgres"]
+CMD ["postgres"]

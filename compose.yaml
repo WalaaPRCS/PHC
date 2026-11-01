@@ -1,6 +1,8 @@
 services:
   db:
-    image: postgres:17-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: phc
@@ -8,9 +10,6 @@ services:
     volumes:
       - phc-postgres:/var/lib/postgresql/data
       - phc-runtime-secrets:/run/phc-secrets
-      - ./docker/init-secrets.sh:/run/init-secrets.sh:ro
-      - ./docker/start-postgres.sh:/run/start-postgres.sh:ro
-    entrypoint: ["/bin/sh", "/run/start-postgres.sh"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-/bin/sh /run/init-secrets.sh
+/usr/local/bin/phc-init-secrets
 
 secret_dir=/run/phc-secrets
 password=$(cat "$secret_dir/postgres_password")
