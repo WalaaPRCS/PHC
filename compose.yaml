@@ -11,7 +11,6 @@ services:
       - ./docker/init-secrets.sh:/run/init-secrets.sh:ro
       - ./docker/start-postgres.sh:/run/start-postgres.sh:ro
     entrypoint: ["/bin/sh", "/run/start-postgres.sh"]
-    command: ["postgres"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s

@@ -13,4 +13,4 @@ export POSTGRES_PASSWORD="$password"
 unset password
 
 echo "Runtime secrets are ready; starting PostgreSQL."
-exec /usr/local/bin/docker-entrypoint.sh "$@"
+exec /usr/local/bin/docker-entrypoint.sh postgres
