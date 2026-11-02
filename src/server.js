@@ -624,6 +624,13 @@ async function handleApi(req, res, url) {
   if (!user && !integration) return send(res, 401, { error: 'authentication_required', requestId });
   if (req.method === 'GET' && url.pathname === '/api/v1/state') {
     if (!user) return send(res, 403, { error: 'human_session_required', requestId });
+    if (user.role === 'system_admin') {
+      try {
+        if (await seedDemoData(pool, syncNormalized)) console.log('Loaded clearly labeled demo records during admin state load');
+      } catch (error) {
+        console.error('Demo data retry failed:', error.message);
+      }
+    }
     return send(res, 200, await loadState(user));
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/integrations/clients') {
