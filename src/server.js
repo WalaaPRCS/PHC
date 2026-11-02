@@ -874,7 +874,11 @@ async function main() {
   requiredEnv('DATA_ENCRYPTION_KEY', 64);
   requiredEnv('DATA_LOOKUP_KEY', 64);
   await pool.query('SELECT 1');
-  if (await seedDemoData(pool, syncNormalized)) console.log('Loaded clearly labeled demo records');
+  try {
+    if (await seedDemoData(pool, syncNormalized)) console.log('Loaded clearly labeled demo records');
+  } catch (error) {
+    console.error('Demo records could not be loaded; application startup will continue:', error.message);
+  }
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
