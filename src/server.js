@@ -7,6 +7,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { pool, audit } from './db.js';
 import { hashPassword, verifyPassword, opaqueToken, tokenHash, encryptNationalId, decryptNationalId, hashNationalId } from './security.js';
 import { seedDemoData } from './demo-data.js';
+import { seedClinicMappingData } from './clinic-mapping-data.js';
 
 const root = fileURLToPath(new URL('../public/', import.meta.url));
 const sessionDurationMs = 8 * 60 * 60 * 1000;
@@ -184,10 +185,10 @@ async function syncNormalized(client, resource, payload, recordId) {
     const code = String(payload.code || recordId).slice(0, 120);
     await client.query(
       `INSERT INTO clinics(code,name,status,location,address,phone,metadata)
-       VALUES($1,$2,$3,$4,$5,$6,jsonb_build_object('appRecordId',$7))
+       VALUES($1,$2,$3,$4,$5,$6,jsonb_build_object('appRecordId',$7) || $8::jsonb)
        ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name,status=EXCLUDED.status,location=EXCLUDED.location,
          address=EXCLUDED.address,phone=EXCLUDED.phone,metadata=clinics.metadata || EXCLUDED.metadata,updated_at=now()`,
-      [code, payload.name || code, payload.status || 'active', payload.location || '', payload.address || '', payload.phone || '', recordId],
+      [code, payload.name || code, payload.status || 'active', payload.location || '', payload.address || '', payload.phone || '', recordId, JSON.stringify(payload.sourceMetadata || {})],
     );
     const clinic = await client.query('SELECT id FROM clinics WHERE code=$1', [code]);
     await client.query('DELETE FROM clinic_services WHERE clinic_id=$1', [clinic.rows[0].id]);
@@ -630,6 +631,11 @@ async function handleApi(req, res, url) {
       } catch (error) {
         console.error('Demo data retry failed:', error.message);
       }
+      try {
+        if (await seedClinicMappingData(pool, syncNormalized)) console.log('Imported mapped PRCS clinics during admin state load');
+      } catch (error) {
+        console.error('Clinic mapping import retry failed:', error.message);
+      }
     }
     return send(res, 200, await loadState(user));
   }
@@ -885,6 +891,11 @@ async function main() {
     if (await seedDemoData(pool, syncNormalized)) console.log('Loaded clearly labeled demo records');
   } catch (error) {
     console.error('Demo records could not be loaded; application startup will continue:', error.message);
+  }
+  try {
+    if (await seedClinicMappingData(pool, syncNormalized)) console.log('Imported mapped PRCS clinics and services');
+  } catch (error) {
+    console.error('Clinic mapping import could not be loaded; application startup will continue:', error.message);
   }
   const server = createServer(async (req, res) => {
     try {
