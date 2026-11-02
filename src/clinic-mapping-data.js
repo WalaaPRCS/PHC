@@ -587,7 +587,13 @@ export async function seedClinicMappingData(pool, syncNormalized) {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['phc-clinic-mapping-2026-v1']);
     const imported = await client.query("SELECT 1 FROM app_records WHERE resource='system_meta' AND record_id='clinic-mapping-2026-v1'");
-    if (imported.rowCount) { await client.query('COMMIT'); return false; }
+    const existing = await client.query("SELECT count(*)::int AS count FROM app_records WHERE resource='clinics' AND record_id = ANY($1::text[])", [clinicMappingRecords.map((record) => record.id)]);
+    // A marker alone is not proof that all clinic rows survived a deployment or manual cleanup.
+    // Repair a partial import while leaving a complete import and subsequent edits untouched.
+    if (imported.rowCount && existing.rows[0].count === clinicMappingRecords.length) {
+      await client.query('COMMIT');
+      return false;
+    }
     for (const record of clinicMappingRecords) {
       try {
         await client.query(
