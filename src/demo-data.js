@@ -98,7 +98,11 @@ export async function seedDemoData(pool, syncNormalized) {
            VALUES($1,$2,$3,$4::jsonb) ON CONFLICT(resource,record_id) DO NOTHING`,
           [group.resource, id, clinicRef, JSON.stringify(record)],
         );
-        await syncNormalized(client, group.resource, record, id);
+        try {
+          await syncNormalized(client, group.resource, record, id);
+        } catch (error) {
+          throw new Error(`تعذر تجهيز العينة ${group.resource}/${id}: ${error.message}`, { cause: error });
+        }
       }
     }
     await client.query("INSERT INTO app_records(resource,record_id,payload) VALUES('system_meta','demo-seed-v1',jsonb_build_object('createdAt',now(),'label','بيانات تجريبية')) ON CONFLICT DO NOTHING");
