@@ -234,12 +234,13 @@ async function syncNormalized(client, resource, payload, recordId) {
     if (!clinic.rows[0]) return;
     const specialty = await client.query('SELECT id FROM service_catalog WHERE name=$1', [payload.specialtyService || '']);
     await client.query(
-      `INSERT INTO staff_members(source_record_id,clinic_id,external_code,display_name,job_title,specialty_service_id,phone,active,metadata)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+      `INSERT INTO staff_members(source_record_id,clinic_id,external_code,display_name,job_title,specialty_service_id,phone,active,employment_type,employment_status,metadata)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
        ON CONFLICT(source_record_id) DO UPDATE SET clinic_id=EXCLUDED.clinic_id,external_code=EXCLUDED.external_code,
         display_name=EXCLUDED.display_name,job_title=EXCLUDED.job_title,specialty_service_id=EXCLUDED.specialty_service_id,
-        phone=EXCLUDED.phone,active=EXCLUDED.active,metadata=EXCLUDED.metadata`,
-      [recordId, clinic.rows[0].id, payload.employeeCode || null, payload.name || 'مقدم خدمة', payload.jobTitle || 'مقدم خدمة', specialty.rows[0]?.id || null, payload.phone || null, payload.status !== 'موقوف', JSON.stringify({ services: payload.services || [] })],
+        phone=EXCLUDED.phone,active=EXCLUDED.active,employment_type=EXCLUDED.employment_type,
+        employment_status=EXCLUDED.employment_status,metadata=EXCLUDED.metadata`,
+      [recordId, clinic.rows[0].id, payload.employeeCode || null, payload.name || 'مقدم خدمة', payload.jobTitle || 'مقدم خدمة', specialty.rows[0]?.id || null, payload.phone || null, !['موقوف','موقوف مؤقتًا','إجازة','منتهي الخدمة'].includes(payload.status), payload.employmentType || 'غير محدد', payload.status === 'نشط' ? 'على رأس العمل' : payload.status === 'موقوف مؤقتًا' ? 'موقوف' : payload.status || 'على رأس العمل', JSON.stringify({ services: payload.services || [] })],
     );
     const staff = await client.query('SELECT id FROM staff_members WHERE source_record_id=$1', [recordId]);
     await client.query('DELETE FROM staff_services WHERE staff_id=$1', [staff.rows[0].id]);
