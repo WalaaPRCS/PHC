@@ -137,7 +137,8 @@ function filterPatientRecord(record, user, clinics) {
   const visits = Array.isArray(record.visits) ? record.visits : [];
   const own = visits.filter((visit) => allowed.has(normalizedClinicRef(visit, clinics)));
   const latestOther = visits.filter((visit) => !allowed.has(normalizedClinicRef(visit, clinics))).sort((a, b) => new Date(b.date) - new Date(a.date))[0];
-  if (!own.length && !latestOther) return null;
+  const homeClinicAllowed = allowed.has(normalizedClinicRef(record, clinics));
+  if (!own.length && !latestOther && !homeClinicAllowed) return null;
   return { ...record, visits: own.sort((a, b) => new Date(b.date) - new Date(a.date)), latestOtherVisit: latestOther ? { id: latestOther.id, date: latestOther.date, clinic: latestOther.clinic, service: latestOther.service, status: latestOther.status } : null };
 }
 
@@ -207,7 +208,7 @@ async function syncNormalized(client, resource, payload, recordId) {
          date_of_birth=EXCLUDED.date_of_birth,gender=EXCLUDED.gender,phone=EXCLUDED.phone,
          alternate_phone=EXCLUDED.alternate_phone,address=EXCLUDED.address,metadata=patients.metadata || EXCLUDED.metadata,updated_at=now()`,
       [patientNumber, payload.nationalId ? hashNationalId(payload.nationalId) : null, payload.nationalId ? encryptNationalId(payload.nationalId) : null, payload.name || 'مريض', payload.dateOfBirth || null, gender, payload.phone || null, payload.alternatePhone || null, payload.address || null,
-        JSON.stringify({ fileNo: patientNumber, bloodType: payload.bloodType || null })],
+        JSON.stringify({ fileNo: patientNumber, bloodType: payload.bloodType || null, nationality: payload.nationality || null, maritalStatus: payload.maritalStatus || null, emergencyContact: payload.emergencyContact || null })],
     );
     for (const visit of Array.isArray(payload.visits) ? payload.visits : []) {
       await upsertNormalizedVisit(client, patientNumber, visit);
