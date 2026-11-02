@@ -185,7 +185,7 @@ async function syncNormalized(client, resource, payload, recordId) {
     const code = String(payload.code || recordId).slice(0, 120);
     await client.query(
       `INSERT INTO clinics(code,name,status,location,address,phone,metadata)
-       VALUES($1,$2,$3,$4,$5,$6,jsonb_build_object('appRecordId',$7) || $8::jsonb)
+       VALUES($1,$2,$3,$4,$5,$6,jsonb_build_object('appRecordId',$7::text) || $8::jsonb)
        ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name,status=EXCLUDED.status,location=EXCLUDED.location,
          address=EXCLUDED.address,phone=EXCLUDED.phone,metadata=clinics.metadata || EXCLUDED.metadata,updated_at=now()`,
       [code, payload.name || code, payload.status || 'active', payload.location || '', payload.address || '', payload.phone || '', recordId, JSON.stringify(payload.sourceMetadata || {})],
