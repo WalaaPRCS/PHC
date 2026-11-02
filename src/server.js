@@ -741,7 +741,11 @@ async function handleApi(req, res, url) {
         if (prior) updated += 1; else created += 1;
       }
       importStage = 'audit';
-      await audit({ actorId: user.id, action: 'clinics.json.imported', entityType: 'clinic', requestId, details: { created, updated, total: records.length } });
+      await client.query(
+        `INSERT INTO audit_events(actor_user_id,action,entity_type,request_id,details)
+         VALUES($1,$2,$3,$4,$5::jsonb)`,
+        [user.id, 'clinics.json.imported', 'clinic', requestId, JSON.stringify({ clinicRef: null, created, updated, total: records.length })],
+      );
       importStage = 'commit';
       await client.query('COMMIT');
     } catch (error) {
