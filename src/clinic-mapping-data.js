@@ -587,18 +587,16 @@ export async function seedClinicMappingData(pool, syncNormalized) {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['phc-clinic-mapping-2026-v1']);
     const imported = await client.query("SELECT 1 FROM app_records WHERE resource='system_meta' AND record_id='clinic-mapping-2026-v1'");
-    const existing = await client.query("SELECT record_id FROM app_records WHERE resource='clinics' AND record_id = ANY($1::text[])", [clinicMappingRecords.map((record) => record.id)]);
-    const existingIds = new Set(existing.rows.map((row) => row.record_id));
+    const existing = await client.query("SELECT count(*)::int AS count FROM app_records WHERE resource='clinics' AND record_id = ANY($1::text[])", [clinicMappingRecords.map((record) => record.id)]);
     // A marker alone is not proof that all clinic rows survived a deployment or manual cleanup.
-    // Restore only missing rows so edits to clinics that are already present are preserved.
-    if (imported.rowCount && existingIds.size === clinicMappingRecords.length) {
+    // Repair a partial import while leaving a complete import and subsequent edits untouched.
+    if (imported.rowCount && existing.rows[0].count === clinicMappingRecords.length) {
       await client.query('COMMIT');
       return false;
     }
     for (const record of clinicMappingRecords) {
-      if (existingIds.has(record.id)) continue;
       try {
-        await client.query(`
+        await client.query(
           `INSERT INTO app_records(resource,record_id,clinic_ref,payload)
            VALUES('clinics',$1,$1,$2::jsonb)
            ON CONFLICT(resource,record_id) DO UPDATE SET clinic_ref=EXCLUDED.clinic_ref,payload=EXCLUDED.payload,version=app_records.version+1,updated_at=now()`,
