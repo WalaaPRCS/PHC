@@ -660,8 +660,14 @@ async function handleApi(req, res, url) {
     if (!Array.isArray(sourceRecords) || sourceRecords.length < 1 || sourceRecords.length > 500) {
       return send(res, 400, { error: 'clinic_records_must_be_an_array', requestId });
     }
+    const canonicalServices = [
+      ['general-medicine', 'طب عام'], ['nursing', 'تمريض'], ['nutrition', 'تغذية'],
+      ['vaccination', 'تطعيم'], ['maternal-care', 'رعاية أمومة'], ['child-care', 'رعاية طفل'],
+      ['mental-health', 'صحة نفسية'], ['dental', 'صحة فم وأسنان'], ['laboratory', 'مختبر'],
+      ['radiology', 'أشعة'], ['pharmacy', 'صيدلية'], ['health-education', 'تثقيف صحي'],
+    ];
     const serviceRows = await pool.query('SELECT name FROM service_catalog WHERE active=true');
-    const validServices = new Set(serviceRows.rows.map((row) => row.name));
+    const validServices = new Set([...serviceRows.rows.map((row) => row.name), ...canonicalServices.map(([, name]) => name)]);
     const records = [];
     const seenCodes = new Set();
     const seenIds = new Set();
@@ -671,9 +677,11 @@ async function handleApi(req, res, url) {
       const name = String(source.name || '').trim();
       const id = String(source.id || code).trim();
       const services = Array.isArray(source.services) ? [...new Set(source.services.map((value) => String(value).trim()).filter(Boolean))] : [];
-      if (!code || code.length > 120 || !id || id.length > 250 || !name || name.length > 200 || !services.length || services.some((service) => !validServices.has(service))) {
+      const unknownServices = services.filter((service) => !validServices.has(service));
+      if (!code || code.length > 120 || !id || id.length > 250 || !name || name.length > 200 || !services.length) {
         return send(res, 400, { error: 'invalid_clinic_data_or_service', row: index + 1, requestId });
       }
+      if (unknownServices.length) return send(res, 400, { error: 'unknown_clinic_services', row: index + 1, services: unknownServices, requestId });
       if (seenCodes.has(code)) return send(res, 400, { error: 'duplicate_clinic_code', row: index + 1, requestId });
       if (seenIds.has(id)) return send(res, 400, { error: 'duplicate_clinic_id', row: index + 1, requestId });
       seenCodes.add(code);
@@ -701,6 +709,13 @@ async function handleApi(req, res, url) {
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['phc-clinic-json-import-v1']);
+      for (const [serviceCode, serviceName] of canonicalServices) {
+        await client.query(
+          `INSERT INTO service_catalog(code,name,active) VALUES($1,$2,true)
+           ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name,active=true`,
+          [serviceCode, serviceName],
+        );
+      }
       const existing = await client.query("SELECT record_id,payload FROM app_records WHERE resource='clinics' FOR UPDATE");
       const byCode = new Map(existing.rows.map((row) => [String(row.payload.code || ''), row]));
       const byId = new Map(existing.rows.map((row) => [row.record_id, row]));
