@@ -607,7 +607,7 @@ export async function seedClinicMappingData(pool, syncNormalized) {
         throw new Error(`تعذر استيراد العيادة ${record.name} (${record.code}): ${error.message}`, { cause: error });
       }
     }
-    await client.query("INSERT INTO app_records(resource,record_id,payload) VALUES('system_meta','clinic-mapping-2026-v1',jsonb_build_object('count',$1,'label','استيراد عيادات وخدمات 2026')) ON CONFLICT DO NOTHING", [clinicMappingRecords.length]);
+    await client.query("INSERT INTO app_records(resource,record_id,payload) VALUES('system_meta','clinic-mapping-2026-v1',jsonb_build_object('count',$1::integer,'label','استيراد عيادات وخدمات 2026')) ON CONFLICT DO NOTHING", [clinicMappingRecords.length]);
     await client.query('COMMIT');
     return true;
   } catch (error) {
