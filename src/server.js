@@ -653,6 +653,80 @@ async function handleApi(req, res, url) {
     }
     return send(res, 200, await loadState(user));
   }
+  if (req.method === 'POST' && url.pathname === '/api/v1/clinics/import') {
+    if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
+    const body = await readJson(req);
+    const sourceRecords = Array.isArray(body) ? body : body && typeof body === 'object' ? body.records : null;
+    if (!Array.isArray(sourceRecords) || sourceRecords.length < 1 || sourceRecords.length > 500) {
+      return send(res, 400, { error: 'clinic_records_must_be_an_array', requestId });
+    }
+    const serviceRows = await pool.query('SELECT name FROM service_catalog WHERE active=true');
+    const validServices = new Set(serviceRows.rows.map((row) => row.name));
+    const records = [];
+    const seenCodes = new Set();
+    const seenIds = new Set();
+    for (const [index, source] of sourceRecords.entries()) {
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return send(res, 400, { error: 'invalid_clinic_record', row: index + 1, requestId });
+      const code = String(source.code || '').trim();
+      const name = String(source.name || '').trim();
+      const id = String(source.id || code).trim();
+      const services = Array.isArray(source.services) ? [...new Set(source.services.map((value) => String(value).trim()).filter(Boolean))] : [];
+      if (!code || code.length > 120 || !id || id.length > 250 || !name || name.length > 200 || !services.length || services.some((service) => !validServices.has(service))) {
+        return send(res, 400, { error: 'invalid_clinic_data_or_service', row: index + 1, requestId });
+      }
+      if (seenCodes.has(code)) return send(res, 400, { error: 'duplicate_clinic_code', row: index + 1, requestId });
+      if (seenIds.has(id)) return send(res, 400, { error: 'duplicate_clinic_id', row: index + 1, requestId });
+      seenCodes.add(code);
+      seenIds.add(id);
+      records.push({
+        id,
+        code,
+        name,
+        location: String(source.location || '').trim(),
+        address: String(source.address || '').trim(),
+        phone: String(source.phone || '').trim(),
+        status: String(source.status || 'فعالة').trim(),
+        services,
+        facilityType: String(source.facilityType || '').trim(),
+        coordinates: String(source.coordinates || '').trim(),
+        coLocatedHospital: String(source.coLocatedHospital || '').trim(),
+        coLocated: Boolean(source.coLocated),
+        notes: String(source.notes || '').trim(),
+        sourceMetadata: source.sourceMetadata && typeof source.sourceMetadata === 'object' && !Array.isArray(source.sourceMetadata) ? source.sourceMetadata : {},
+      });
+    }
+    const client = await pool.connect();
+    let created = 0;
+    let updated = 0;
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['phc-clinic-json-import-v1']);
+      const existing = await client.query("SELECT record_id,payload FROM app_records WHERE resource='clinics' FOR UPDATE");
+      const byCode = new Map(existing.rows.map((row) => [String(row.payload.code || ''), row]));
+      const byId = new Map(existing.rows.map((row) => [row.record_id, row]));
+      for (const record of records) {
+        const prior = byCode.get(record.code) || byId.get(record.id);
+        const recordId = prior?.record_id || record.id;
+        const payload = { ...record, id: recordId };
+        await client.query(
+          `INSERT INTO app_records(resource,record_id,clinic_ref,payload,updated_by)
+           VALUES('clinics',$1,$1,$2::jsonb,$3)
+           ON CONFLICT(resource,record_id) DO UPDATE SET clinic_ref=EXCLUDED.clinic_ref,payload=EXCLUDED.payload,
+             version=app_records.version+1,updated_by=EXCLUDED.updated_by,updated_at=now()`,
+          [recordId, JSON.stringify(payload), user.id],
+        );
+        await syncNormalized(client, 'clinics', payload, recordId);
+        if (prior) updated += 1; else created += 1;
+      }
+      await audit({ actorId: user.id, action: 'clinics.json.imported', entityType: 'clinic', requestId, details: { created, updated, total: records.length } });
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
+    const state = await loadState(user);
+    return send(res, 200, { ok: true, created, updated, total: records.length, clinics: state.prcsDemoClinicsV1, requestId });
+  }
   if (req.method === 'POST' && url.pathname === '/api/v1/integrations/clients') {
     if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
     const body = await readJson(req);
@@ -872,7 +946,7 @@ async function handleApi(req, res, url) {
 
 function contentType(path) {
   const extension = extname(path).toLowerCase();
-  return ({ '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' })[extension] || 'application/octet-stream';
+  return ({ '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' })[extension] || 'application/octet-stream';
 }
 
 async function serveStatic(req, res, url) {
