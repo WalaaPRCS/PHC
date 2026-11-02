@@ -710,11 +710,14 @@ async function handleApi(req, res, url) {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['phc-clinic-json-import-v1']);
       for (const [serviceCode, serviceName] of canonicalServices) {
-        await client.query(
-          `INSERT INTO service_catalog(code,name,active) VALUES($1,$2,true)
-           ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name,active=true`,
-          [serviceCode, serviceName],
-        );
+        const namedService = await client.query('UPDATE service_catalog SET active=true WHERE name=$1 RETURNING id', [serviceName]);
+        if (namedService.rowCount) continue;
+        const codedService = await client.query('SELECT id FROM service_catalog WHERE code=$1', [serviceCode]);
+        if (codedService.rowCount) {
+          await client.query('UPDATE service_catalog SET name=$2,active=true WHERE code=$1', [serviceCode, serviceName]);
+        } else {
+          await client.query('INSERT INTO service_catalog(code,name,active) VALUES($1,$2,true)', [serviceCode, serviceName]);
+        }
       }
       const existing = await client.query("SELECT record_id,payload FROM app_records WHERE resource='clinics' FOR UPDATE");
       const byCode = new Map(existing.rows.map((row) => [String(row.payload.code || ''), row]));
