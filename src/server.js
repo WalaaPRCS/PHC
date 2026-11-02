@@ -443,6 +443,20 @@ async function replaceResource(user, resource, body, req) {
         throw Object.assign(new Error('record_outside_user_clinic'), { status: 403 });
       }
       let normalizedRecord = record;
+      if (resource === 'clinics' && !record.sourceMetadata) {
+        const priorClinic = await client.query('SELECT payload FROM app_records WHERE resource=$1 AND record_id=$2 FOR UPDATE', [resource, id]);
+        if (priorClinic.rows[0]?.payload?.sourceMetadata) {
+          const prior = priorClinic.rows[0].payload;
+          normalizedRecord = {
+            ...record,
+            facilityType: record.facilityType || prior.facilityType,
+            coordinates: record.coordinates || prior.coordinates,
+            coLocated: record.coLocated ?? prior.coLocated,
+            coLocatedHospital: record.coLocatedHospital || prior.coLocatedHospital,
+            sourceMetadata: prior.sourceMetadata,
+          };
+        }
+      }
       if (resource === 'patients' && user.role !== 'system_admin') {
         const existing = await client.query('SELECT clinic_ref,payload FROM app_records WHERE resource=$1 AND record_id=$2 FOR UPDATE', [resource, id]);
         const existingOwnVisit = (existing.rows[0]?.payload.visits || []).some((visit) => allowed.has(normalizedClinicRef(visit, clinics)));
