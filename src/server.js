@@ -706,9 +706,11 @@ async function handleApi(req, res, url) {
     const client = await pool.connect();
     let created = 0;
     let updated = 0;
+    let importStage = 'starting';
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['phc-clinic-json-import-v1']);
+      importStage = 'service_catalog';
       for (const [serviceCode, serviceName] of canonicalServices) {
         const namedService = await client.query('UPDATE service_catalog SET active=true WHERE name=$1 RETURNING id', [serviceName]);
         if (namedService.rowCount) continue;
@@ -719,10 +721,12 @@ async function handleApi(req, res, url) {
           await client.query('INSERT INTO service_catalog(code,name,active) VALUES($1,$2,true)', [serviceCode, serviceName]);
         }
       }
+      importStage = 'existing_clinics';
       const existing = await client.query("SELECT record_id,payload FROM app_records WHERE resource='clinics' FOR UPDATE");
       const byCode = new Map(existing.rows.map((row) => [String(row.payload.code || ''), row]));
       const byId = new Map(existing.rows.map((row) => [row.record_id, row]));
       for (const record of records) {
+        importStage = `clinic:${record.code}`;
         const prior = byCode.get(record.code) || byId.get(record.id);
         const recordId = prior?.record_id || record.id;
         const payload = { ...record, id: recordId };
@@ -736,11 +740,14 @@ async function handleApi(req, res, url) {
         await syncNormalized(client, 'clinics', payload, recordId);
         if (prior) updated += 1; else created += 1;
       }
+      importStage = 'audit';
       await audit({ actorId: user.id, action: 'clinics.json.imported', entityType: 'clinic', requestId, details: { created, updated, total: records.length } });
+      importStage = 'commit';
       await client.query('COMMIT');
     } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('Clinic JSON import failed', { requestId, stage: importStage, code: error.code || '', constraint: error.constraint || '', message: error.message });
+      return send(res, 500, { error: 'clinic_import_failed', requestId });
     } finally { client.release(); }
     const state = await loadState(user);
     return send(res, 200, { ok: true, created, updated, total: records.length, clinics: state.prcsDemoClinicsV1, requestId });
