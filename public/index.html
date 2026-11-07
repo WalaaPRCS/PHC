@@ -1083,7 +1083,7 @@
       let selectedManagerSection='projects',editingProjectId=null;
       let timer;
       function notify(message){toast.textContent=message;toast.classList.add('show');clearTimeout(timer);timer=setTimeout(()=>toast.classList.remove('show'),3600);}
-      function loadDemoState(key,fallback){try{const raw=localStorage.getItem(key);if(!raw)return fallback;const value=JSON.parse(raw);return Array.isArray(value)?value:fallback;}catch{return fallback;}}
+      function loadDemoState(key,fallback){const bootstrap=window.__phcInitialState?.[key];if(Array.isArray(bootstrap))return bootstrap;try{const raw=localStorage.getItem(key);if(!raw)return fallback;const value=JSON.parse(raw);return Array.isArray(value)?value:fallback;}catch{return fallback;}}
       function saveDemoState(){try{localStorage.setItem('prcsDemoClinicsV1',JSON.stringify(clinicRecords));localStorage.setItem('prcsDemoStaffV1',JSON.stringify(staffRecords));localStorage.setItem('prcsDemoProjectsV1',JSON.stringify(projects));localStorage.setItem('prcsDemoAllocationsV1',JSON.stringify(allocations));return true;}catch{return false;}}
       const serviceCatalog=['طب عام','تمريض','تغذية','تطعيم','رعاية أمومة','رعاية طفل','صحة نفسية','صحة فم وأسنان','مختبر','أشعة','صيدلية','تثقيف صحي'];
       let clinicRecords=loadDemoState('prcsDemoClinicsV1',[]);
