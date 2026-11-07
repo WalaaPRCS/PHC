@@ -149,7 +149,12 @@
         password.value = '';
         await authenticated(result.user);
       } catch (error) {
-        showLoginError(error.status === 429 ? 'محاولات كثيرة. انتظر عشر دقائق ثم أعد المحاولة.' : 'اسم المستخدم أو كلمة المرور غير صحيحة، أو تعذر الاتصال بالخادم.');
+        const message = error.status === 429
+          ? 'تم إيقاف محاولات الدخول مؤقتًا. انتظر عشر دقائق ثم أعد المحاولة.'
+          : error.status === 401
+            ? 'اسم المستخدم أو كلمة المرور غير صحيحة.'
+            : 'تعذر تحميل بيانات النظام بعد تسجيل الدخول. أعد تحميل الصفحة وتحقق من اتصال الخادم.';
+        showLoginError(message);
       } finally { submit.disabled = false; }
     });
     setupForm?.addEventListener('submit', async (event) => {
