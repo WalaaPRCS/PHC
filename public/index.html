@@ -1360,7 +1360,7 @@ function openVisitDetails(patient,visit){
         const directory=document.getElementById('patientDirectory');directory.replaceChildren();
         const uniquePatients=uniquePatientFiles();
         if(remotePatientLookup&&!uniquePatients.some(patient=>patient.fileNo===remotePatientLookup.fileNo))uniquePatients.unshift(remotePatientLookup);
-        const filtered=uniquePatients.filter(p=>`${p.name} ${p.fileNo} ${p.nationalId||''}`.toLowerCase().includes(query));
+        const filtered=uniquePatients.filter(p=>`${p.name} ${p.fileNo} ${p.nationalId||''}`.toLowerCase().includes(query)||(remotePatientLookup&&p.fileNo===remotePatientLookup.fileNo));
         filtered.forEach(p=>{
           const row=document.createElement('div');row.className='patient-row-entry';
           const btn=document.createElement('button');btn.type='button';btn.className='patient-row'+(p.fileNo===selectedPatientFile?' active':'');btn.dataset.fileNo=p.fileNo;
@@ -1565,7 +1565,7 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
           }
         },350);
       });
-      document.getElementById('clearPatientsFilter').addEventListener('click',()=>{document.getElementById('patientsFilter').value='';renderPatientFiles();});
+      document.getElementById('clearPatientsFilter').addEventListener('click',()=>{patientLookupSequence++;clearTimeout(patientLookupTimer);remotePatientLookup=null;document.getElementById('patientsFilter').value='';renderPatientFiles();});
       document.getElementById('patientDirectory').addEventListener('click',event=>{const row=event.target.closest('[data-file-no]');if(row){selectedPatientFile=row.dataset.fileNo;renderPatientFiles();}});
       role.addEventListener('change',function(){
         const manager=this.value==='manager',labStaff=this.value==='lab';
