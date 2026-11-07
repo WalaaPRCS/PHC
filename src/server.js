@@ -622,7 +622,7 @@ async function backfillImportedVaccinationVisits(actorId) {
     await client.query(
       `WITH source_rows AS (
          SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
-           "recordId" text,"visitNumber" text,"fileNo" text,"date" text,"status" text,
+           "recordId" text,"visitNumber" text,"fileNo" text,"clinicRef" text,"date" text,"status" text,
            "complaint" text,"assessment" text,"plan" text,"payload" jsonb
          )
        ), saved AS (
@@ -633,11 +633,7 @@ async function backfillImportedVaccinationVisits(actorId) {
                 x."complaint",x."assessment",x."plan",'{}'::jsonb,x.payload
            FROM source_rows x
            JOIN patients p ON p.patient_number=x."fileNo"
-           JOIN clinics c ON c.metadata->>'appRecordId'=(SELECT record_id FROM app_records clinics
-                                                         WHERE clinics.resource='clinics'
-                                                           AND clinics.record_id=(SELECT clinic_ref FROM app_records
-                                                                                   WHERE resource='visits' AND record_id='vax-'||x."recordId")
-                                                         LIMIT 1)
+           JOIN clinics c ON c.metadata->>'appRecordId'=x."clinicRef"
            LEFT JOIN service_catalog s ON s.name='تطعيم'
          ON CONFLICT(visit_number) DO UPDATE SET occurred_at=EXCLUDED.occurred_at,
            status=EXCLUDED.status,chief_complaint=EXCLUDED.chief_complaint,
