@@ -1294,7 +1294,7 @@ function nextQueueNumber(){const today=new Date(),key=`${today.getFullYear()}-${
             function splitPatientName(fullName){const parts=String(fullName||'').trim().split(/\s+/).filter(Boolean);return [parts[0]||'',parts[1]||'',parts[2]||'',parts.slice(3).join(' ')||''];}
       function openPatientEditDialog(patient){
         const form=document.getElementById('patientEditForm');form.reset();
-        const [first,father,grandfather,family]=splitPatientName(patient.name);
+        const [first,father,grandfather,family]=patient.nameParts?[patient.nameParts.firstName||'',patient.nameParts.fatherName||'',patient.nameParts.grandfatherName||'',patient.nameParts.familyName||'']:splitPatientName(patient.name);
         [['editPatientFirstName',first],['editPatientFatherName',father],['editPatientGrandfatherName',grandfather],['editPatientFamilyName',family],['editPatientNationalId',patient.nationalId],['editPatientDob',patient.dateOfBirth],['editPatientGender',patient.gender],['editPatientNationality',patient.nationality||'فلسطيني'],['editPatientMaritalStatus',patient.maritalStatus],['editPatientBloodType',patient.bloodType],['editPatientPhone',patient.phone],['editPatientAlternatePhone',patient.alternatePhone],['editPatientAddress',patient.address],['editPatientEmergencyContact',patient.emergencyContact]].forEach(([id,value])=>{document.getElementById(id).value=value||'';});
         document.getElementById('patientEditTitle').textContent=`تعديل ملف المريض · ${patient.fileNo}`;
         document.getElementById('patientEditDialog').showModal();
