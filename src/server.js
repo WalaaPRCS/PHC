@@ -1111,24 +1111,76 @@ async function handleApi(req, res, url) {
   }
   if (req.method === 'GET' && url.pathname === '/api/v1/patients/lookup') {
     if (!user && !hasScope(integration, 'patients:lookup')) return send(res, 403, { error: 'patient_lookup_forbidden', requestId });
-    const nationalId = String(url.searchParams.get('nationalId') || '').replace(/\D/g, '');
-    if (nationalId.length < 6 || nationalId.length > 20) return send(res, 400, { error: 'invalid_national_id' });
-    const { rows } = await pool.query(
+    if (user && !['system_admin','clinic_admin','clinician','reception','pharmacist','lab_technician'].includes(user.role)) {
+      return send(res, 403, { error: 'patient_lookup_forbidden', requestId });
+    }
+    const nationalId = String(url.searchParams.get('nationalId') || '').replace(/[^0-9]/g, '');
+    if (nationalId.length < 6 || nationalId.length > 20) return send(res, 400, { error: 'invalid_national_id', requestId });
+    const digest = hashNationalId(nationalId);
+    let result = await pool.query(
       `SELECT p.id,p.patient_number,p.full_name,p.national_id_ciphertext,p.date_of_birth,p.gender,p.phone,p.alternate_phone,p.address,
-              v.visit_number,v.clinical_data->>'id' AS source_visit_id,v.occurred_at,v.status,s.name AS service,c.name AS clinic
+              r.clinic_ref,r.payload,v.visit_number,v.clinical_data->>'id' AS source_visit_id,v.occurred_at,v.status,
+              s.name AS service,c.name AS clinic
          FROM patients p
+         LEFT JOIN app_records r ON r.resource='patients' AND r.record_id=p.patient_number
          LEFT JOIN LATERAL (SELECT * FROM visits WHERE patient_id=p.id ORDER BY occurred_at DESC LIMIT 1) v ON true
          LEFT JOIN clinics c ON c.id=v.clinic_id
          LEFT JOIN service_catalog s ON s.id=v.service_id
-        WHERE p.national_id_hash=$1 LIMIT 1`, [hashNationalId(nationalId)],
+        WHERE p.national_id_hash=$1 LIMIT 1`,
+      [digest],
     );
-    if (!rows[0]) return send(res, 404, { error: 'patient_not_found' });
-    const row = rows[0];
-    await audit({ actorId: user?.id || null, action: 'patient.lookup', entityType: 'patient', entityId: row.patient_number, sourceSystem: integration?.clientId || null, requestId, details: { purpose: user ? 'reception_search' : 'authorized_integration' } });
+    if (!result.rows[0]) {
+      result = await pool.query(
+        `SELECT NULL::uuid AS id,r.record_id AS patient_number,
+                r.payload->>'name' AS full_name,NULL::text AS national_id_ciphertext,
+                NULLIF(r.payload->>'dateOfBirth','')::date AS date_of_birth,
+                r.payload->>'gender' AS gender,r.payload->>'phone' AS phone,
+                r.payload->>'alternatePhone' AS alternate_phone,r.payload->>'address' AS address,
+                r.clinic_ref,r.payload,NULL::text AS visit_number,NULL::text AS source_visit_id,
+                NULL::timestamptz AS occurred_at,NULL::text AS status,NULL::text AS service,
+                r.payload->>'clinic' AS clinic
+           FROM app_records r
+          WHERE r.resource='patients'
+            AND regexp_replace(COALESCE(r.payload->'archiveSource'->>'personId',''),'[^0-9]','','g')=$1
+          LIMIT 1`,
+        [nationalId],
+      );
+    }
+    if (!result.rows[0]) return send(res, 404, { error: 'patient_not_found', requestId });
+    const row = result.rows[0];
+    if (user && user.role !== 'system_admin') {
+      const clinics = (await pool.query("SELECT payload FROM app_records WHERE resource='clinics'")).rows.map((item) => item.payload);
+      const hasClinicAccess = user.clinicRefs.includes(String(row.clinic_ref || '')) ||
+        user.clinicRefs.includes(normalizedClinicRef(row.payload, clinics)) ||
+        (row.payload?.visits || []).some((visit) => user.clinicRefs.includes(normalizedClinicRef(visit, clinics)));
+      if (!hasClinicAccess) return send(res, 403, { error: 'patient_outside_user_clinic', requestId });
+    }
+    const payload = row.payload || {};
+    const archivedVisit = (payload.visits || []).slice().sort((a,b)=>new Date(b.date||0)-new Date(a.date||0))[0];
+    const latestVisit = row.visit_number ? {
+      id: row.source_visit_id || row.visit_number, date: row.occurred_at,
+      clinic: row.clinic || payload.clinic || '', service: row.service || '',
+      status: row.status || '', type: 'آخر زيارة',
+    } : archivedVisit ? {
+      id: archivedVisit.id || archivedVisit.date, date: archivedVisit.date,
+      clinic: archivedVisit.clinic || '', service: archivedVisit.service || '',
+      status: archivedVisit.status || '', type: archivedVisit.type || 'زيارة',
+    } : null;
+    await audit({
+      actorId: user?.id || null, action: 'patient.lookup', entityType: 'patient',
+      entityId: row.patient_number, sourceSystem: integration?.clientId || null,
+      requestId, details: { purpose: user ? 'reception_search' : 'authorized_integration' },
+    });
     return send(res, 200, { patient: {
-      id: row.id, fileNo: row.patient_number, name: row.full_name, nationalId: decryptNationalId(row.national_id_ciphertext),
-      dateOfBirth: row.date_of_birth, gender: row.gender, phone: row.phone, alternatePhone: row.alternate_phone,
-      address: row.address, clinic: row.clinic || '', clinicId: user?.clinicRefs?.[0] || '', visits: row.visit_number ? [{ id: row.source_visit_id || row.visit_number, date: row.occurred_at, clinic: row.clinic, service: row.service, status: row.status, type: 'آخر زيارة' }] : [],
+      id: row.id || row.patient_number, fileNo: row.patient_number,
+      name: row.full_name || payload.name || 'مريض',
+      nationalId: decryptNationalId(row.national_id_ciphertext) || nationalId,
+      dateOfBirth: row.date_of_birth || payload.dateOfBirth || '',
+      gender: row.gender || payload.gender || '', phone: row.phone || payload.phone || '',
+      alternatePhone: row.alternate_phone || payload.alternatePhone || '',
+      address: row.address || payload.address || '', clinic: row.clinic || payload.clinic || '',
+      clinicId: row.clinic_ref || payload.clinicId || '',
+      visits: latestVisit ? [latestVisit] : [],
     }, requestId });
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/pharmacy/dispense') {
