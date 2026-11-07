@@ -330,6 +330,8 @@
     #prcsClinicalConcept .immunization-intro{display:flex;justify-content:space-between;align-items:flex-start;gap:15px;margin-bottom:16px}
     #prcsClinicalConcept .immunization-intro h2{font-size:19px;margin:0}
     #prcsClinicalConcept .immunization-intro p{font-size:11px;color:var(--muted);margin:5px 0 0}
+    #prcsClinicalConcept .immunization-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-start}
+    #prcsClinicalConcept .immunization-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 4px;color:var(--muted);font-size:11px}
     #prcsClinicalConcept .immunization-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:15px}
     #prcsClinicalConcept .immunization-stat{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff}
     #prcsClinicalConcept .immunization-stat small{display:block;color:var(--muted);font-size:10px}
@@ -675,12 +677,12 @@
           </section>
         </div>
         <div id="immunizationsView" class="immunizations-view" aria-live="polite">
-          <div class="immunization-intro"><div><h2>سجل التطعيمات</h2><p>تسجيل الجرعات والمواعيد وربط كل جرعة بملف المريض والزيارة.</p></div><button class="btn primary" id="newImmunizationBtn" type="button">+ تسجيل جرعة / موعد</button></div>
+          <div class="immunization-intro"><div><h2>سجل التطعيمات</h2><p>تسجيل الجرعات والمواعيد وربط كل جرعة بملف المريض والزيارة.</p></div><div class="immunization-actions"><button class="btn primary" id="newImmunizationBtn" type="button">+ تسجيل جرعة / موعد</button><button class="btn" id="importVaccinationArchiveBtn" type="button" hidden>استيراد أرشيف التطعيمات</button><input id="vaccinationArchiveFile" type="file" accept=".json,application/json" hidden></div></div>
           <div class="unified-note">سجل التطعيمات مرتبط برقم الملف الموحد للمريض. عند تسجيل إعطاء جرعة، تُضاف زيارة تطعيم إلى الملف الطبي وتظهر تفاصيلها ضمن سجل الزيارات. جدول التطعيمات الوطني والفواصل الزمنية تُحدد وفق البروتوكول المعتمد لدى الهلال الأحمر.</div>
           <div id="immunizationStats" class="immunization-stats"></div>
           <section class="patients-panel"><div class="panel-head"><div><div class="panel-title">الجرعات والمواعيد</div><div class="panel-sub">بحث موحد باسم المريض أو رقم الملف أو اسم اللقاح</div></div></div>
             <div class="immunization-toolbar"><input id="immunizationSearch" type="search" placeholder="ابحث بالمريض أو رقم الملف أو اللقاح" aria-label="البحث في سجل التطعيمات"><select id="immunizationStatusFilter" aria-label="تصفية حسب الحالة"><option value="">كل الحالات</option><option>أُعطي</option><option>مجدول</option><option>مؤجل</option><option>رفض</option><option>موانع</option></select><select id="immunizationClinicFilter" aria-label="تصفية حسب العيادة"><option value="">كل العيادات</option></select></div>
-            <div class="pharmacy-table-wrap"><table class="pharmacy-table"><thead><tr><th>التاريخ / الموعد</th><th>المريض / رقم الملف</th><th>اللقاح والجرعة</th><th>العيادة</th><th>الحالة</th><th>التشغيلة / مقدم الخدمة</th><th>إجراء</th></tr></thead><tbody id="immunizationRows"></tbody></table><div id="immunizationEmpty" class="empty-state" hidden>لا توجد جرعات أو مواعيد تطعيم مطابقة.</div></div>
+            <div class="pharmacy-table-wrap"><table class="pharmacy-table"><thead><tr><th>التاريخ / الموعد</th><th>المريض / رقم الملف</th><th>اللقاح والجرعة</th><th>العيادة</th><th>الحالة</th><th>التشغيلة / مقدم الخدمة</th><th>إجراء</th></tr></thead><tbody id="immunizationRows"></tbody></table><div id="immunizationEmpty" class="empty-state" hidden>لا توجد جرعات أو مواعيد تطعيم مطابقة.</div></div><div id="immunizationPagination" class="immunization-pagination" hidden></div>
           </section>
         </div>
         <div id="referralsView" class="referrals-view" aria-live="polite">
@@ -1386,20 +1388,48 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         filtered.slice().sort((a,b)=>new Date(b.requestedAt)-new Date(a.requestedAt)).forEach(order=>{const tr=document.createElement('tr'),patientCell=document.createElement('td'),patient=document.createElement('button');patient.type='button';patient.className='lab-test-link';patient.textContent=`${order.patientName} · ${order.fileNo}`;patient.addEventListener('click',()=>{const p=patientRecords.find(x=>x.fileNo===order.fileNo);if(p)openPatientProfile(p);});patientCell.append(patient);const testCell=document.createElement('td');const test=document.createElement('strong');test.textContent=order.testName;const specimen=document.createElement('small');specimen.textContent=`العينة: ${order.specimen}`;testCell.append(test,specimen);const visitCell=document.createElement('td');visitCell.textContent=`${order.clinic} · ${order.visitService||'زيارة'}`;const date=document.createElement('td');date.textContent=patientDate(order.requestedAt);const priority=document.createElement('td');priority.textContent=order.priority;const state=document.createElement('td');const chip=document.createElement('span');chip.className='lab-status '+labStatusClass(order.status);chip.textContent=order.status;state.append(chip);const result=document.createElement('td');result.className='lab-result-cell';result.textContent=order.resultValue||'—';if(order.resultUnit){const unit=document.createElement('small');unit.textContent=order.resultUnit;result.append(unit);}const action=document.createElement('td');if(role.value==='lab'||role.value==='manager'){const edit=document.createElement('button');edit.type='button';edit.className='btn';edit.textContent=order.status==='مكتمل'?'عرض / تعديل النتيجة':'إدخال النتيجة';edit.addEventListener('click',()=>openLabResult(order.id));action.append(edit);}else{const view=document.createElement('button');view.type='button';view.className='btn';view.textContent='تفاصيل الزيارة';view.addEventListener('click',()=>{const p=patientRecords.find(x=>x.fileNo===order.fileNo),v=p?.visits.find(x=>x.id===order.visitId);if(p&&v)openVisitDetails(p,v);});action.append(view);}tr.append(patientCell,testCell,visitCell,date,priority,state,result,action);rows.append(tr);});
         document.getElementById('labEmpty').hidden=filtered.length>0;const count=status=>labOrders.filter(o=>status==='active'?o.status!=='مكتمل'&&o.status!=='تعذر إجراء الفحص':o.status===status).length;document.getElementById('labStats').innerHTML=`<div class="lab-stat"><small>كل الطلبات</small><strong>${labOrders.length}</strong></div><div class="lab-stat"><small>بانتظار الإجراء</small><strong>${count('active')}</strong></div><div class="lab-stat"><small>تحاليل مكتملة</small><strong>${count('مكتمل')}</strong></div>`;
       }
-      let editingImmunizationId=null;
+      let editingImmunizationId=null,immunizationCurrentPage=1;
+      const immunizationPageSize=100;
       function saveImmunizations(){try{localStorage.setItem('prcsDemoImmunizationsV1',JSON.stringify(immunizationRecords));return true;}catch{return false;}}
+      async function importVaccinationArchiveFile(file){
+        if(window.phcUser?.role!=='system_admin'){notify('استيراد أرشيف التطعيمات متاح لمدير النظام فقط');return;}
+        if(file.size>16*1024*1024){notify('حجم الملف يتجاوز الحد المسموح للاستيراد');return;}
+        let archive;
+        try{archive=JSON.parse(await file.text());}catch{notify('تعذر قراءة الملف؛ تأكد أنه JSON صالح');return;}
+        const patients=archive?.patients,immunizations=archive?.immunizations,source=archive?.source||{};
+        if(archive?.format!=='PRCS-PHC-PATIENT-ARCHIVE-IMPORT'||archive?.version!==1||!Array.isArray(patients)||!Array.isArray(immunizations)||source.clinicCode!=='PRCS-PHC-MAP-005'||source.clinicNameAr!=='عيادة القدس'){
+          notify('صيغة الملف أو اسم عيادة القدس غير مطابقين لقالب الاستيراد');return;
+        }
+        const reviewCount=patients.filter(patient=>patient.namePartsReviewRequired).length;
+        const message='سيتم استيراد أرشيف عيادة القدس: '+patients.length+' ملف مريض و'+immunizations.length+' جرعة تطعيم. ستتم المطابقة برقم الهوية؛ الملفات الموجودة ستُحدّث بالبيانات الناقصة فقط، والجرعات المستوردة سابقًا لن تتكرر.'+(reviewCount?'\nيوجد '+reviewCount+' اسمًا يحتاج مراجعة تقسيم الاسم إلى أربعة مقاطع.':'')+'\n\nهل تريد المتابعة؟';
+        if(!window.confirm(message))return;
+        notify('جارٍ استيراد أرشيف التطعيمات إلى قاعدة البيانات…');
+        try{
+          const result=await window.phcApi('/immunizations/archive-import',{method:'POST',body:JSON.stringify(archive)});
+          notify('اكتمل الاستيراد: '+result.createdPatients+' ملفات جديدة، '+result.matchedPatients+' ملفات مطابقة، '+result.importedDoses+' جرعة أضيفت، '+result.skippedDoses+' جرعة مكررة تم تجاوزها.');
+          setTimeout(()=>window.location.reload(),1400);
+        }catch(error){
+          const reason=error.payload?.error==='al_quds_clinic_not_configured'?'عيادة القدس غير مضافة في إعدادات النظام.':error.payload?.error==='archive_clinic_must_be_al_quds'?'الملف لا يشير إلى عيادة القدس.':'تعذر استيراد الملف إلى قاعدة البيانات.';
+          notify(reason+' راجع الملف أو سجل الخادم.');
+          console.error('vaccination archive import failed',error.message);
+        }
+      }
       function renderImmunizations(){
         const clinicFilter=document.getElementById('immunizationClinicFilter'),oldClinic=clinicFilter.value,visibleClinics=assignedClinics();
         clinicFilter.replaceChildren(new Option('كل العيادات',''));visibleClinics.forEach(clinic=>clinicFilter.add(new Option(clinic.name,clinic.name)));if(visibleClinics.some(clinic=>clinic.name===oldClinic))clinicFilter.value=oldClinic;
         document.getElementById('newImmunizationBtn').disabled=role.value==='lab';
+        document.getElementById('importVaccinationArchiveBtn').hidden=window.phcUser?.role!=='system_admin';
+        const patientByFileNo=new Map(patientRecords.map(patient=>[patient.fileNo,patient]));
         const query=document.getElementById('immunizationSearch').value.trim().toLowerCase(),statusFilter=document.getElementById('immunizationStatusFilter').value,clinic=clinicFilter.value;
-        const visibleRecords=immunizationRecords.filter(record=>{const patient=patientRecords.find(item=>item.fileNo===record.fileNo),allowed=window.phcUser?.role==='system_admin'||(window.phcUser?.clinicRefs||[]).includes(record.clinicId||clinicRecords.find(item=>item.name===record.clinic)?.id||'');return allowed&&(!query||`${patient?.name||''} ${record.fileNo} ${record.vaccine} ${record.dose}`.toLowerCase().includes(query))&&(!statusFilter||record.status===statusFilter)&&(!clinic||record.clinic===clinic);});
+        const visibleRecords=immunizationRecords.filter(record=>{const patient=patientByFileNo.get(record.fileNo),allowed=window.phcUser?.role==='system_admin'||(window.phcUser?.clinicRefs||[]).includes(record.clinicId||clinicRecords.find(item=>item.name===record.clinic)?.id||'');return allowed&&(!query||`${patient?.name||''} ${record.fileNo} ${record.vaccine} ${record.dose}`.toLowerCase().includes(query))&&(!statusFilter||record.status===statusFilter)&&(!clinic||record.clinic===clinic);});
         const today=new Date().toISOString().slice(0,10),visible=visibleRecords;
         const stat=(label,value)=>`<div class="immunization-stat"><small>${label}</small><strong>${value}</strong></div>`;
         document.getElementById('immunizationStats').innerHTML=stat('إجمالي السجلات',visible.length)+stat('جرعات أُعطيت',visible.filter(record=>record.status==='أُعطي').length)+stat('مواعيد قادمة',visible.filter(record=>record.status==='مجدول'&&record.dueDate>=today).length)+stat('مواعيد تجاوزت التاريخ',visible.filter(record=>record.status==='مجدول'&&record.dueDate<today).length);
         const rows=document.getElementById('immunizationRows');rows.replaceChildren();
-        visible.slice().sort((a,b)=>new Date(b.date||b.dueDate||0)-new Date(a.date||a.dueDate||0)).forEach(record=>{
-          const patient=patientRecords.find(item=>item.fileNo===record.fileNo),tr=document.createElement('tr');
+        const ordered=visible.slice().sort((a,b)=>new Date(b.date||b.dueDate||0)-new Date(a.date||a.dueDate||0));
+        const pageCount=Math.max(1,Math.ceil(ordered.length/immunizationPageSize));immunizationCurrentPage=Math.min(immunizationCurrentPage,pageCount);
+        ordered.slice((immunizationCurrentPage-1)*immunizationPageSize,immunizationCurrentPage*immunizationPageSize).forEach(record=>{
+          const patient=patientByFileNo.get(record.fileNo),tr=document.createElement('tr');
           const date=document.createElement('td');date.textContent=record.date?new Date(record.date+'T00:00:00').toLocaleDateString('ar'):record.dueDate?`موعد: ${new Date(record.dueDate+'T00:00:00').toLocaleDateString('ar')}`:'—';
           const patientCell=document.createElement('td'),patientLink=document.createElement('button');patientLink.type='button';patientLink.className='lab-test-link';patientLink.textContent=`${patient?.name||'مريض غير معروف'} · ${record.fileNo}`;patientLink.addEventListener('click',()=>{if(patient)openPatientProfile(patient);});patientCell.append(patientLink);
           const vaccine=document.createElement('td');vaccine.textContent=`${record.vaccine} · ${record.dose}`;if(record.dueDate&&record.status==='أُعطي'){const due=document.createElement('small');due.textContent=`الجرعة القادمة: ${new Date(record.dueDate+'T00:00:00').toLocaleDateString('ar')}`;vaccine.append(due);}
@@ -1410,6 +1440,8 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
           tr.append(date,patientCell,vaccine,clinicCell,statusCell,provider,action);rows.append(tr);
         });
         document.getElementById('immunizationEmpty').hidden=visible.length>0;
+        const pager=document.getElementById('immunizationPagination');pager.hidden=ordered.length<=immunizationPageSize;pager.replaceChildren();
+        if(!pager.hidden){const info=document.createElement('span');info.textContent='صفحة '+immunizationCurrentPage+' من '+pageCount+' · '+ordered.length+' سجل';const controls=document.createElement('div');controls.className='immunization-actions';const previous=document.createElement('button');previous.type='button';previous.className='btn';previous.textContent='السابق';previous.disabled=immunizationCurrentPage<=1;previous.addEventListener('click',()=>{immunizationCurrentPage--;renderImmunizations();});const next=document.createElement('button');next.type='button';next.className='btn';next.textContent='التالي';next.disabled=immunizationCurrentPage>=pageCount;next.addEventListener('click',()=>{immunizationCurrentPage++;renderImmunizations();});controls.append(previous,next);pager.append(info,controls);}
       }
       function openImmunizationDialog(record=null,administer=false){
         if(role.value==='lab'){notify('تسجيل التطعيم متاح لمقدم الخدمة أو مدير النظام');return;}
@@ -1472,6 +1504,8 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
       document.getElementById('pharmacyAllocationForm').addEventListener('submit',e=>{e.preventDefault();const drugId=document.getElementById('stockDrugSelect').value,clinic=document.getElementById('stockTargetClinic').value,strength=document.getElementById('stockFormStrength').value.trim(),unit=document.getElementById('stockFormUnit').value.trim(),quantity=Number(document.getElementById('stockFormQty').value),batch=document.getElementById('stockFormBatch').value.trim(),expiry=document.getElementById('stockFormExpiry').value;if(!drugById(drugId)||!Number.isInteger(quantity)||quantity<1){notify('اختر دواءً من الكتالوج وأدخل كمية صحيحة');return;}const existing=pharmacyStock.find(s=>s.drugId===drugId&&s.clinic===clinic&&s.strength===strength&&s.unit===unit&&s.batch===batch&&s.expiry===expiry);if(existing)existing.quantity+=quantity;else pharmacyStock.push({id:'s'+Date.now(),drugId,clinic,strength,unit,quantity,batch,expiry,unitCostNis:drugById(drugId)?.unitCostNis});localStorage.setItem('prcsDemoPharmacyStockV1',JSON.stringify(pharmacyStock));e.target.reset();renderPharmacy();renderCentralCatalog();notify('تم ربط رصيد الدواء بالعيادة المحددة');});
       document.querySelectorAll('[data-pharmacy-page]').forEach(button=>button.addEventListener('click',()=>setPharmacyPage(button.dataset.pharmacyPage)));
       document.getElementById('newImmunizationBtn').addEventListener('click',()=>openImmunizationDialog());
+      document.getElementById('importVaccinationArchiveBtn').addEventListener('click',()=>document.getElementById('vaccinationArchiveFile').click());
+      document.getElementById('vaccinationArchiveFile').addEventListener('change',async event=>{const file=event.target.files?.[0];event.target.value='';if(file)await importVaccinationArchiveFile(file);});
       document.getElementById('immunizationForm').addEventListener('submit',recordVaccination);
       document.getElementById('immunizationStatus').addEventListener('change',updateImmunizationRequiredFields);
       document.getElementById('immunizationSearch').addEventListener('input',renderImmunizations);
