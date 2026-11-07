@@ -915,8 +915,11 @@ async function handleApi(req, res, url) {
          ), source_patients AS (
            SELECT DISTINCT file_no FROM source_doses WHERE NULLIF(file_no,'') IS NOT NULL
          )
-         UPDATE app_records patient SET payload=jsonb_set(patient.payload,'{visits}',
-           COALESCE((
+         UPDATE app_records patient SET payload=jsonb_set(
+           CASE WHEN (patient.payload->>'clinicId')=ANY($6::text[]) OR patient.payload->>'clinic'='Al Mawasi MP'
+                THEN patient.payload || jsonb_build_object('clinic',$2::text,'clinicId',$3::text,'clinicNameAr',$4::text)
+                ELSE patient.payload END,
+           '{visits}',COALESCE((
              SELECT jsonb_agg(
                CASE WHEN EXISTS (
                  SELECT 1 FROM jsonb_array_elements_text(COALESCE(entry.visit->'immunizationIds','[]'::jsonb)) linked(record_id)
@@ -936,7 +939,7 @@ async function handleApi(req, res, url) {
                 JOIN source_doses dose ON dose.record_id=linked.record_id
               )
             )`,
-        [archiveFileName,clinicName,clinic.record_id,clinicNameAr,user.id],
+        [archiveFileName,clinicName,clinic.record_id,clinicNameAr,user.id,sourceRows.rows.map(row=>String(row.clinic_ref||''))],
       );
       await audit({
         actorId:user.id,clinicRef:clinic.record_id,action:'immunizations.archive_clinic_correction',
