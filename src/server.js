@@ -764,7 +764,7 @@ async function handleApi(req, res, url) {
           clinic: current.clinic || clinic.payload.name,
           clinicId: current.clinicId || clinic.record_id,
           visits: Array.isArray(current.visits) ? current.visits : [],
-          archiveSource: { system: 'vaccinations_inquiries', clinicCode, personId: entry.nationalId },
+          archiveSource: { system: 'vaccinations_inquiries', clinicCode, personIdHash: identityHash },
           nationalId: entry.nationalId,
           nationalTail: entry.nationalId.slice(-4),
         };
