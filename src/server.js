@@ -707,11 +707,14 @@ async function handleApi(req, res, url) {
     let matchedPatients = 0;
     let importedDoses = 0;
     let skippedDoses = 0;
+    let importStage = 'starting';
     try {
       await client.query('BEGIN');
+      importStage = 'patient_records';
       const fileNoByNationalId = new Map();
       const patientIdByNationalId = new Map();
-      for (const entry of archivePatients) {
+      for (const [patientIndex, entry] of archivePatients.entries()) {
+        importStage = `patient_${patientIndex + 1}_of_${archivePatients.length}`;
         const identityHash = hashNationalId(entry.nationalId);
         const existing = await client.query(
           'SELECT patient_number,full_name,date_of_birth,gender,phone,alternate_phone,address FROM patients WHERE national_id_hash=$1 FOR UPDATE',
@@ -781,6 +784,7 @@ async function handleApi(req, res, url) {
         fileNoByNationalId.set(entry.nationalId, fileNo);
         patientIdByNationalId.set(entry.nationalId, typed.rows[0].id);
       }
+      importStage = 'prepare_vaccination_rows';
       const vaccineRows = archiveImmunizations.map((dose) => {
         const fileNo = fileNoByNationalId.get(dose.nationalId);
         const patientId = patientIdByNationalId.get(dose.nationalId);
@@ -805,6 +809,7 @@ async function handleApi(req, res, url) {
         };
         return { recordId: dose.sourceRecordId, patientId, payload: record };
       });
+      importStage = 'insert_vaccination_records';
       const insertedVaccines = await client.query(
         `WITH source_rows AS (
            SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(record_id text,patient_id uuid,payload jsonb)
@@ -818,6 +823,7 @@ async function handleApi(req, res, url) {
       importedDoses = insertedVaccines.rowCount;
       skippedDoses = vaccineRows.length - importedDoses;
       const sourceRecordIds = vaccineRows.map((row) => row.recordId);
+      importStage = 'normalize_vaccination_records';
       if (sourceRecordIds.length) {
         await client.query(
           `INSERT INTO immunizations(source_record_id,patient_id,visit_id,clinic_id,vaccine_code,vaccine_name,dose,status,administered_at,due_at,batch_number,metadata)
@@ -835,16 +841,19 @@ async function handleApi(req, res, url) {
           [sourceRecordIds, clinic.record_id],
         );
       }
+      importStage = 'audit';
       await audit({
         actorId: user.id, clinicRef: clinic.record_id, action: 'immunizations.archive_import',
         entityType: 'vaccination_archive', entityId: clinicCode, requestId,
         details: { patientsInFile: archivePatients.length, createdPatients, matchedPatients, importedDoses, skippedDoses },
       });
+      importStage = 'commit';
       await client.query('COMMIT');
       return send(res, 200, { ok: true, clinicName: clinic.payload.name, clinicNameAr: 'عيادة القدس', patientsInFile: archivePatients.length, createdPatients, matchedPatients, importedDoses, skippedDoses, requestId });
     } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('Vaccination archive import failed', { requestId, stage: importStage, code: error.code || '', constraint: error.constraint || '', message: error.message });
+      return send(res, 500, { error: 'archive_import_failed', requestId, stage: importStage, code: error.code || '' });
     } finally {
       client.release();
     }
