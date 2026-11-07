@@ -812,10 +812,10 @@ async function handleApi(req, res, url) {
       importStage = 'insert_vaccination_records';
       const insertedVaccines = await client.query(
         `WITH source_rows AS (
-           SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(record_id text,patient_id uuid,payload jsonb)
+           SELECT * FROM jsonb_to_recordset($1::jsonb) AS x("recordId" text,"patientId" uuid,payload jsonb)
          )
          INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
-         SELECT 'immunizations',record_id,$2,patient_id,payload,$3,$3 FROM source_rows
+         SELECT 'immunizations',"recordId",$2,"patientId",payload,$3,$3 FROM source_rows
          ON CONFLICT(resource,record_id) DO NOTHING
          RETURNING record_id`,
         [JSON.stringify(vaccineRows), clinic.record_id, user.id],
