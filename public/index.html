@@ -1425,8 +1425,10 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
           setTimeout(()=>window.location.reload(),1400);
         }catch(error){
           const reason=error.payload?.error==='al_quds_clinic_not_configured'?'عيادة القدس غير مضافة في إعدادات النظام.':error.payload?.error==='archive_clinic_must_be_al_quds'?'الملف لا يشير إلى عيادة القدس.':error.payload?.error==='invalid_archive_patient'?'بيانات مريض غير صالحة في الملف.':error.payload?.error==='invalid_archive_immunization'?'بيانات جرعة غير صالحة في الملف.':'تعذر استيراد الدفعة '+activeBatch+' من '+batches.length+'.';
+          const stage=error.payload?.stage?' المرحلة: '+error.payload.stage+'.':'';
+          const code=error.payload?.code?' رمز قاعدة البيانات: '+error.payload.code+'.':'';
           const reference=error.payload?.requestId?' مرجع الخطأ: '+error.payload.requestId+'.':'';
-          notify(reason+reference+' يمكنك إعادة الاستيراد بأمان؛ السجلات المضافة مسبقًا لن تتكرر.');
+          notify(reason+stage+code+reference+' يمكنك إعادة الاستيراد بأمان؛ السجلات المضافة مسبقًا لن تتكرر.');
           console.error('vaccination archive import failed at batch '+activeBatch,error.message,error.payload?.requestId||'');
         }
       }
