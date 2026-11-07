@@ -708,7 +708,7 @@
           </section>
         </div>
         <div id="immunizationsView" class="immunizations-view" aria-live="polite">
-          <div class="immunization-intro"><div><h2>سجل التطعيمات</h2><p>تسجيل الجرعات والمواعيد وربط كل جرعة بملف المريض والزيارة.</p></div><div class="immunization-actions"><button class="btn primary" id="newImmunizationBtn" type="button">+ تسجيل جرعة / موعد</button><button class="btn" id="importVaccinationArchiveBtn" type="button" hidden>استيراد أرشيف التطعيمات</button><input id="vaccinationArchiveFile" type="file" accept=".json,application/json" hidden></div></div>
+          <div class="immunization-intro"><div><h2>سجل التطعيمات</h2><p>تسجيل الجرعات والمواعيد وربط كل جرعة بملف المريض والزيارة.</p></div><div class="immunization-actions"><button class="btn primary" id="newImmunizationBtn" type="button">+ تسجيل جرعة / موعد</button><button class="btn" id="importVaccinationArchiveBtn" type="button" hidden>استيراد أرشيف التطعيمات</button><button class="btn" id="correctMawasiQararaArchiveBtn" type="button" hidden>تصحيح عيادة أرشيف المواصي</button><input id="vaccinationArchiveFile" type="file" accept=".json,application/json" hidden></div></div>
           <div class="unified-note">سجل التطعيمات مرتبط برقم الملف الموحد للمريض. عند تسجيل إعطاء جرعة، تُضاف زيارة تطعيم إلى الملف الطبي وتظهر تفاصيلها ضمن سجل الزيارات. جدول التطعيمات الوطني والفواصل الزمنية تُحدد وفق البروتوكول المعتمد لدى الهلال الأحمر.</div>
           <div id="immunizationStats" class="immunization-stats"></div>
           <section class="patients-panel"><div class="panel-head"><div><div class="panel-title">الجرعات والمواعيد</div><div class="panel-sub">بحث موحد باسم المريض أو رقم الملف أو اسم اللقاح</div></div></div>
@@ -1502,6 +1502,7 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         clinicFilter.replaceChildren(new Option('كل العيادات',''));visibleClinics.forEach(clinic=>clinicFilter.add(new Option(clinic.name,clinic.name)));if(visibleClinics.some(clinic=>clinic.name===oldClinic))clinicFilter.value=oldClinic;
         document.getElementById('newImmunizationBtn').disabled=role.value==='lab';
         document.getElementById('importVaccinationArchiveBtn').hidden=window.phcUser?.role!=='system_admin';
+        document.getElementById('correctMawasiQararaArchiveBtn').hidden=window.phcUser?.role!=='system_admin';
         const patientByFileNo=new Map(patientRecords.map(patient=>[patient.fileNo,patient]));
         const query=document.getElementById('immunizationSearch').value.trim().toLowerCase(),statusFilter=document.getElementById('immunizationStatusFilter').value,clinic=clinicFilter.value;
         const visibleRecords=immunizationRecords.filter(record=>{const patient=patientByFileNo.get(record.fileNo),allowed=window.phcUser?.role==='system_admin'||(window.phcUser?.clinicRefs||[]).includes(record.clinicId||clinicRecords.find(item=>item.name===record.clinic)?.id||'');return allowed&&(!query||`${patient?.name||''} ${record.fileNo} ${record.vaccine} ${record.dose}`.toLowerCase().includes(query))&&(!statusFilter||record.status===statusFilter)&&(!clinic||record.clinic===clinic);});
@@ -1600,6 +1601,20 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
       document.getElementById('newImmunizationBtn').addEventListener('click',()=>openImmunizationDialog());
       document.getElementById('importVaccinationArchiveBtn').addEventListener('click',()=>document.getElementById('vaccinationArchiveFile').click());
       document.getElementById('vaccinationArchiveFile').addEventListener('change',async event=>{const file=event.target.files?.[0];event.target.value='';if(file)await importVaccinationArchiveFile(file);});
+      document.getElementById('correctMawasiQararaArchiveBtn').addEventListener('click',async event=>{
+        if(window.phcUser?.role!=='system_admin'){notify('تصحيح ربط أرشيف التطعيمات متاح لمدير النظام فقط');return;}
+        if(!confirm('سيتم تعديل ربط آخر أرشيف «مواصي القرارة» إلى عيادة Mawasi Al Qarara MP في سجلات الجرعات والزيارات الموجودة، دون إضافة أو تكرار أي سجل. متابعة؟'))return;
+        const button=event.currentTarget;button.disabled=true;
+        try{
+          const result=await window.phcApi('/immunizations/archive-clinic-correction',{method:'POST',body:JSON.stringify({})});
+          notify('اكتمل تصحيح العيادة: '+Number(result.movedDoses||0).toLocaleString('ar')+' جرعة، '+Number(result.movedVisitRecords||0).toLocaleString('ar')+' زيارة، و'+Number(result.updatedPatients||0).toLocaleString('ar')+' ملف مريض. لم تتم إضافة سجلات جديدة.');
+          setTimeout(()=>window.location.reload(),1300);
+        }catch(error){
+          const message=error.payload?.error==='archive_records_not_found'?'لم يتم العثور على سجلات الأرشيف السابق لتصحيحها.':error.payload?.error==='target_clinic_not_found'?'عيادة Mawasi Al Qarara MP غير موجودة أو غير مفعلة في إعدادات النظام.':error.payload?.error==='target_clinic_not_normalized'?'تعذر ربط العيادة بقاعدة البيانات؛ راجع إعداد العيادة.':'تعذر تصحيح ربط الأرشيف؛ تحقق من اتصال قاعدة البيانات وسجل الخادم.';
+          notify(message);
+        }finally{button.disabled=false;}
+      });
+
       document.getElementById('immunizationForm').addEventListener('submit',recordVaccination);
       document.getElementById('immunizationStatus').addEventListener('change',updateImmunizationRequiredFields);
       document.getElementById('immunizationSearch').addEventListener('input',()=>{immunizationCurrentPage=1;renderImmunizations();});
