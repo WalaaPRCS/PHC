@@ -718,12 +718,14 @@ async function handleApi(req, res, url) {
         );
         let fileNo = existing.rows[0]?.patient_number || '';
         let current = null;
+        let patientClinicRef = clinic.record_id;
         if (fileNo) {
           const record = await client.query(
             "SELECT payload,clinic_ref FROM app_records WHERE resource='patients' AND record_id=$1 FOR UPDATE",
             [fileNo],
           );
           current = record.rows[0]?.payload || null;
+          patientClinicRef = record.rows[0]?.clinic_ref || current?.clinicId || clinic.record_id;
           if (!current) {
             const row = existing.rows[0];
             current = {
@@ -773,7 +775,7 @@ async function handleApi(req, res, url) {
            VALUES('patients',$1,$2,$3,$4::jsonb,$5,$5)
            ON CONFLICT(resource,record_id) DO UPDATE SET patient_id=EXCLUDED.patient_id,
              payload=EXCLUDED.payload,version=app_records.version+1,updated_by=EXCLUDED.updated_by,updated_at=now()`,
-          [fileNo, current.clinicId || clinic.record_id, typed.rows[0].id, JSON.stringify(stored), user.id],
+          [fileNo, patientClinicRef, typed.rows[0].id, JSON.stringify(stored), user.id],
         );
         fileNoByNationalId.set(entry.nationalId, fileNo);
       }
