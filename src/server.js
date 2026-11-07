@@ -710,6 +710,7 @@ async function handleApi(req, res, url) {
     try {
       await client.query('BEGIN');
       const fileNoByNationalId = new Map();
+      const patientIdByNationalId = new Map();
       for (const entry of archivePatients) {
         const identityHash = hashNationalId(entry.nationalId);
         const existing = await client.query(
@@ -778,15 +779,12 @@ async function handleApi(req, res, url) {
           [fileNo, patientClinicRef, typed.rows[0].id, JSON.stringify(stored), user.id],
         );
         fileNoByNationalId.set(entry.nationalId, fileNo);
+        patientIdByNationalId.set(entry.nationalId, typed.rows[0].id);
       }
-      for (const dose of archiveImmunizations) {
+      const vaccineRows = archiveImmunizations.map((dose) => {
         const fileNo = fileNoByNationalId.get(dose.nationalId);
-        if (!fileNo) throw new Error('archive_patient_mapping_missing');
-        const prior = await client.query(
-          "SELECT 1 FROM app_records WHERE resource='immunizations' AND record_id=$1 FOR UPDATE",
-          [dose.sourceRecordId],
-        );
-        if (prior.rows[0]) { skippedDoses += 1; continue; }
+        const patientId = patientIdByNationalId.get(dose.nationalId);
+        if (!fileNo || !patientId) throw new Error('archive_patient_mapping_missing');
         const record = {
           id: dose.sourceRecordId,
           fileNo,
@@ -805,15 +803,37 @@ async function handleApi(req, res, url) {
           sourceArchive: source.fileName || 'vaccinations_inquiries',
           sourcePersonId: dose.sourcePersonId || dose.nationalId,
         };
-        const patientId = await lookupPatientId(client, record, 'immunizations');
+        return { recordId: dose.sourceRecordId, patientId, payload: record };
+      });
+      const insertedVaccines = await client.query(
+        `WITH source_rows AS (
+           SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(record_id text,patient_id uuid,payload jsonb)
+         )
+         INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
+         SELECT 'immunizations',record_id,$2,patient_id,payload,$3,$3 FROM source_rows
+         ON CONFLICT(resource,record_id) DO NOTHING
+         RETURNING record_id`,
+        [JSON.stringify(vaccineRows), clinic.record_id, user.id],
+      );
+      importedDoses = insertedVaccines.rowCount;
+      skippedDoses = vaccineRows.length - importedDoses;
+      const sourceRecordIds = vaccineRows.map((row) => row.recordId);
+      if (sourceRecordIds.length) {
         await client.query(
-          `INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
-           VALUES('immunizations',$1,$2,$3,$4::jsonb,$5,$5)
-           ON CONFLICT(resource,record_id) DO NOTHING`,
-          [dose.sourceRecordId, clinic.record_id, patientId, JSON.stringify(record), user.id],
+          `INSERT INTO immunizations(source_record_id,patient_id,visit_id,clinic_id,vaccine_code,vaccine_name,dose,status,administered_at,due_at,batch_number,metadata)
+           SELECT r.record_id,p.id,NULL,c.id,NULLIF(r.payload->>'vaccineCode',''),
+             COALESCE(NULLIF(r.payload->>'vaccine',''),'تطعيم'),
+             COALESCE(NULLIF(r.payload->>'dose',''),'غير محدد'),
+             COALESCE(NULLIF(r.payload->>'status',''),'مجدول'),
+             CASE WHEN r.payload->>'status'='أُعطي' THEN NULLIF(r.payload->>'date','')::timestamptz ELSE NULL END,
+             NULLIF(r.payload->>'dueDate','')::timestamptz,NULLIF(r.payload->>'batch',''),r.payload
+           FROM app_records r
+           JOIN patients p ON p.patient_number=r.payload->>'fileNo'
+           JOIN clinics c ON c.metadata->>'appRecordId'=$2
+           WHERE r.resource='immunizations' AND r.record_id=ANY($1::text[])
+           ON CONFLICT(source_record_id) DO NOTHING`,
+          [sourceRecordIds, clinic.record_id],
         );
-        await syncNormalized(client, 'immunizations', record, dose.sourceRecordId);
-        importedDoses += 1;
       }
       await audit({
         actorId: user.id, clinicRef: clinic.record_id, action: 'immunizations.archive_import',
