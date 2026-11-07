@@ -649,7 +649,7 @@ async function persistVaccinationVisitRows(client, rows, actorId) {
   await client.query(
     `DELETE FROM app_records
       WHERE resource='visits' AND payload->>'immunizationId' IS NOT NULL
-        AND record_id NOT IN (SELECT jsonb_array_elements($1::jsonb)->>'visitId')`,
+        AND record_id NOT IN (SELECT item->>'visitId' FROM jsonb_array_elements($1::jsonb) AS item)`,
     [visitJson],
   );
   return visits.length;
@@ -672,6 +672,7 @@ async function backfillImportedVaccinationVisits(actorId) {
         WHERE dose.resource='immunizations'
           AND dose.payload->>'status'='أُعطي'
           AND dose.payload ? 'sourcePersonId'
+          AND NULLIF(dose.payload->>'date','') IS NOT NULL
         ORDER BY dose.record_id`,
     );
     if (!rows.length) { await client.query('COMMIT'); return 0; }
