@@ -69,12 +69,12 @@ function cookieValue(header, name) {
   return '';
 }
 
-async function readJson(req) {
+async function readJson(req, maxBytes = maxBodyBytes) {
   const chunks = [];
   let length = 0;
   for await (const chunk of req) {
     length += chunk.length;
-    if (length > maxBodyBytes) throw Object.assign(new Error('حجم الطلب أكبر من المسموح'), { status: 413 });
+    if (length > maxBytes) throw Object.assign(new Error('حجم الطلب أكبر من المسموح'), { status: 413 });
     chunks.push(chunk);
   }
   if (!length) return {};
@@ -654,6 +654,178 @@ async function handleApi(req, res, url) {
       }
     }
     return send(res, 200, await loadState(user));
+  }
+  if (req.method === 'POST' && url.pathname === '/api/v1/immunizations/archive-import') {
+    if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
+    const body = await readJson(req, 16 * 1024 * 1024);
+    if (body.format !== 'PRCS-PHC-PATIENT-ARCHIVE-IMPORT' || body.version !== 1 ||
+        !Array.isArray(body.patients) || !Array.isArray(body.immunizations) ||
+        body.patients.length < 1 || body.patients.length > 5000 ||
+        body.immunizations.length > 20000) {
+      return send(res, 400, { error: 'invalid_vaccination_archive_package', requestId });
+    }
+    const source = body.source || {};
+    const clinicCode = String(source.clinicCode || '').trim();
+    if (clinicCode !== 'PRCS-PHC-MAP-005') return send(res, 400, { error: 'archive_clinic_must_be_al_quds', requestId });
+    const clinicResult = await pool.query(
+      "SELECT record_id,payload FROM app_records WHERE resource='clinics' AND (record_id=$1 OR payload->>'code'=$2) ORDER BY CASE WHEN record_id=$1 THEN 0 ELSE 1 END LIMIT 1",
+      [String(source.clinicId || 'clinic-map-2026-005'), clinicCode],
+    );
+    if (!clinicResult.rows[0]) return send(res, 400, { error: 'al_quds_clinic_not_configured', requestId });
+    const clinic = clinicResult.rows[0];
+    const archivePatients = [];
+    const patientIds = new Set();
+    for (const [index, patient] of body.patients.entries()) {
+      const nationalId = String(patient?.nationalId || patient?.sourcePersonId || '').replace(/[^0-9]/g, '');
+      const name = String(patient?.name || '').trim();
+      const dateOfBirth = String(patient?.dateOfBirth || '').trim();
+      if (!/^\d{6,20}$/.test(nationalId) || !name || name.length > 250 ||
+          (dateOfBirth && !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth))) {
+        return send(res, 400, { error: 'invalid_archive_patient', row: index + 1, requestId });
+      }
+      if (patientIds.has(nationalId)) return send(res, 400, { error: 'duplicate_archive_national_id', row: index + 1, requestId });
+      patientIds.add(nationalId);
+      archivePatients.push({ source: patient, nationalId, name, dateOfBirth });
+    }
+    const archiveImmunizations = [];
+    const sourceIds = new Set();
+    for (const [index, dose] of body.immunizations.entries()) {
+      const sourceRecordId = String(dose?.sourceRecordId || '').trim();
+      const nationalId = String(dose?.nationalId || dose?.sourcePersonId || '').replace(/[^0-9]/g, '');
+      const date = String(dose?.date || '').trim();
+      if (!sourceRecordId || sourceRecordId.length > 200 || !patientIds.has(nationalId) ||
+          !String(dose?.vaccine || '').trim() || !String(dose?.dose || '').trim() ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return send(res, 400, { error: 'invalid_archive_immunization', row: index + 1, requestId });
+      }
+      if (sourceIds.has(sourceRecordId)) return send(res, 400, { error: 'duplicate_archive_source_record', row: index + 1, requestId });
+      sourceIds.add(sourceRecordId);
+      archiveImmunizations.push({ ...dose, sourceRecordId, nationalId, date });
+    }
+    const client = await pool.connect();
+    let createdPatients = 0;
+    let matchedPatients = 0;
+    let importedDoses = 0;
+    let skippedDoses = 0;
+    try {
+      await client.query('BEGIN');
+      const fileNoByNationalId = new Map();
+      for (const entry of archivePatients) {
+        const identityHash = hashNationalId(entry.nationalId);
+        const existing = await client.query(
+          'SELECT patient_number,full_name,date_of_birth,gender,phone,alternate_phone,address FROM patients WHERE national_id_hash=$1 FOR UPDATE',
+          [identityHash],
+        );
+        let fileNo = existing.rows[0]?.patient_number || '';
+        let current = null;
+        if (fileNo) {
+          const record = await client.query(
+            "SELECT payload,clinic_ref FROM app_records WHERE resource='patients' AND record_id=$1 FOR UPDATE",
+            [fileNo],
+          );
+          current = record.rows[0]?.payload || null;
+          if (!current) {
+            const row = existing.rows[0];
+            current = {
+              id: fileNo, fileNo, name: row.full_name || entry.name,
+              dateOfBirth: row.date_of_birth ? String(row.date_of_birth).slice(0, 10) : entry.dateOfBirth,
+              gender: row.gender || '', phone: row.phone || '', alternatePhone: row.alternate_phone || '',
+              address: row.address || '', visits: [],
+            };
+          }
+          matchedPatients += 1;
+        } else {
+          fileNo = 'PR-' + randomUUID().replaceAll('-', '').slice(0, 10).toUpperCase();
+          current = { id: fileNo, fileNo, name: entry.name, dateOfBirth: entry.dateOfBirth, gender: '', phone: '', alternatePhone: '', address: '', visits: [] };
+          createdPatients += 1;
+        }
+        const source = entry.source;
+        const merged = {
+          ...current,
+          id: fileNo,
+          fileNo,
+          name: current.name || entry.name,
+          dateOfBirth: current.dateOfBirth || entry.dateOfBirth,
+          gender: current.gender || source.gender || '',
+          nationality: current.nationality || source.nationality || '',
+          maritalStatus: current.maritalStatus || source.maritalStatus || '',
+          bloodType: current.bloodType || source.bloodType || '',
+          phone: current.phone || source.phone || '',
+          alternatePhone: current.alternatePhone || source.alternatePhone || '',
+          address: current.address || source.address || '',
+          nameParts: current.nameParts || source.nameParts || {},
+          namePartsReviewRequired: current.namePartsReviewRequired ?? Boolean(source.namePartsReviewRequired),
+          clinic: current.clinic || clinic.payload.name,
+          clinicId: current.clinicId || clinic.record_id,
+          visits: Array.isArray(current.visits) ? current.visits : [],
+          archiveSource: { system: 'vaccinations_inquiries', clinicCode, personId: entry.nationalId },
+          nationalId: entry.nationalId,
+          nationalTail: entry.nationalId.slice(-4),
+        };
+        await syncNormalized(client, 'patients', merged, fileNo);
+        const typed = await client.query('SELECT id FROM patients WHERE patient_number=$1', [fileNo]);
+        if (!typed.rows[0]) throw new Error('patient_normalization_failed');
+        const stored = { ...merged };
+        delete stored.nationalId;
+        delete stored.nationalTail;
+        await client.query(
+          `INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
+           VALUES('patients',$1,$2,$3,$4::jsonb,$5,$5)
+           ON CONFLICT(resource,record_id) DO UPDATE SET patient_id=EXCLUDED.patient_id,
+             payload=EXCLUDED.payload,version=app_records.version+1,updated_by=EXCLUDED.updated_by,updated_at=now()`,
+          [fileNo, current.clinicId || clinic.record_id, typed.rows[0].id, JSON.stringify(stored), user.id],
+        );
+        fileNoByNationalId.set(entry.nationalId, fileNo);
+      }
+      for (const dose of archiveImmunizations) {
+        const fileNo = fileNoByNationalId.get(dose.nationalId);
+        if (!fileNo) throw new Error('archive_patient_mapping_missing');
+        const prior = await client.query(
+          "SELECT 1 FROM app_records WHERE resource='immunizations' AND record_id=$1 FOR UPDATE",
+          [dose.sourceRecordId],
+        );
+        if (prior.rows[0]) { skippedDoses += 1; continue; }
+        const record = {
+          id: dose.sourceRecordId,
+          fileNo,
+          vaccine: String(dose.vaccine).trim(),
+          vaccineCode: String(dose.vaccineCode || ''),
+          dose: String(dose.dose).trim(),
+          status: 'أُعطي',
+          date: dose.date,
+          dueDate: '',
+          batch: '',
+          provider: '',
+          notes: '',
+          clinic: clinic.payload.name,
+          clinicNameAr: 'عيادة القدس',
+          clinicId: clinic.record_id,
+          sourceArchive: source.fileName || 'vaccinations_inquiries',
+          sourcePersonId: dose.sourcePersonId || dose.nationalId,
+        };
+        const patientId = await lookupPatientId(client, record, 'immunizations');
+        await client.query(
+          `INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
+           VALUES('immunizations',$1,$2,$3,$4::jsonb,$5,$5)
+           ON CONFLICT(resource,record_id) DO NOTHING`,
+          [dose.sourceRecordId, clinic.record_id, patientId, JSON.stringify(record), user.id],
+        );
+        await syncNormalized(client, 'immunizations', record, dose.sourceRecordId);
+        importedDoses += 1;
+      }
+      await audit({
+        actorId: user.id, clinicRef: clinic.record_id, action: 'immunizations.archive_import',
+        entityType: 'vaccination_archive', entityId: clinicCode, requestId,
+        details: { patientsInFile: archivePatients.length, createdPatients, matchedPatients, importedDoses, skippedDoses },
+      });
+      await client.query('COMMIT');
+      return send(res, 200, { ok: true, clinicName: clinic.payload.name, clinicNameAr: 'عيادة القدس', patientsInFile: archivePatients.length, createdPatients, matchedPatients, importedDoses, skippedDoses, requestId });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/clinics/import') {
     if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
