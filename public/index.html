@@ -656,7 +656,7 @@
           <div class="patients-layout">
             <aside class="patients-panel">
               <div class="panel-head"><div><div class="panel-title">دليل المرضى</div><div class="panel-sub">اختر ملفًا لعرض سجل زياراته</div></div></div>
-              <div class="patients-search"><input id="patientsFilter" type="search" placeholder="ابحث بالاسم أو رقم الملف" aria-label="البحث في ملفات المرضى"><button id="clearPatientsFilter" class="btn" type="button">مسح</button></div>
+              <div class="patients-search"><input id="patientsFilter" type="search" placeholder="ابحث بالاسم أو رقم الملف أو رقم الهوية" aria-label="البحث في ملفات المرضى برقم الهوية أو الاسم أو رقم الملف"><button id="clearPatientsFilter" class="btn" type="button">مسح</button></div>
               <div id="patientDirectory" class="patient-directory"></div>
               <div class="privacy-note">الوصول لبيانات الملف السريري الكامل يكون حسب الدور والصلاحيات، مع تسجيل عمليات الاطلاع.</div>
             </aside>
@@ -1092,6 +1092,7 @@
       let allocations=[];
       allocations=loadDemoState('prcsDemoAllocationsV1',[]);
       let patientRecords=loadDemoState('prcsDemoPatientRecordsV1',[]);
+      let remotePatientLookup=null,patientLookupTimer=null,patientLookupSequence=0;
       patientRecords.forEach(patient=>patient.visits.forEach((visit,index)=>{if(!visit.id)visit.id=`${patient.fileNo}-visit-${index+1}`;}));
       let immunizationRecords=loadDemoState('prcsDemoImmunizationsV1',[]);
       function restoreImmunizationVisits(){immunizationRecords.filter(record=>record.status==='أُعطي'&&record.visitId).forEach(record=>{const patient=patientRecords.find(item=>item.fileNo===record.fileNo);if(!patient||patient.visits.some(visit=>visit.id===record.visitId))return;patient.visits.push({id:record.visitId,date:`${record.date}T12:00:00`,clinic:record.clinic,service:'تطعيم',type:'إعطاء جرعة تطعيم',status:'مكتملة',provider:record.provider||'مقدم الخدمة',complaint:`إعطاء ${record.vaccine} — ${record.dose}`,assessment:'تم توثيق الجرعة ضمن سجل التطعيمات.',plan:record.dueDate?`موعد الجرعة التالية: ${record.dueDate}`:'المتابعة وفق الجدول الوطني المعتمد.',vitals:{},medications:[],procedures:[`إعطاء ${record.vaccine} — ${record.dose}`],referral:'لا توجد إحالة مسجلة.'});});}
@@ -1358,7 +1359,8 @@ function openVisitDetails(patient,visit){
         const query=document.getElementById('patientsFilter').value.trim().toLowerCase();
         const directory=document.getElementById('patientDirectory');directory.replaceChildren();
         const uniquePatients=uniquePatientFiles();
-        const filtered=uniquePatients.filter(p=>`${p.name} ${p.fileNo}`.toLowerCase().includes(query));
+        if(remotePatientLookup&&!uniquePatients.some(patient=>patient.fileNo===remotePatientLookup.fileNo))uniquePatients.unshift(remotePatientLookup);
+        const filtered=uniquePatients.filter(p=>`${p.name} ${p.fileNo} ${p.nationalId||''}`.toLowerCase().includes(query));
         filtered.forEach(p=>{
           const row=document.createElement('div');row.className='patient-row-entry';
           const btn=document.createElement('button');btn.type='button';btn.className='patient-row'+(p.fileNo===selectedPatientFile?' active':'');btn.dataset.fileNo=p.fileNo;
@@ -1546,7 +1548,23 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
       const addPatientBtn=document.getElementById('addPatientBtn');addPatientBtn.hidden=!['system_admin','clinic_admin','clinician','reception','pharmacist','lab_technician'].includes(window.phcUser?.role);addPatientBtn.addEventListener('click',openPatientCreateDialog);document.getElementById('patientCreateForm').addEventListener('submit',submitPatientCreate);
       document.getElementById('patientEditForm').addEventListener('submit',submitPatientEdit);
       document.getElementById('editPatientProfile').addEventListener('click',()=>{if(activeProfilePatient)openPatientEditDialog(activeProfilePatient);});
-      document.getElementById('patientsFilter').addEventListener('input',renderPatientFiles);
+      document.getElementById('patientsFilter').addEventListener('input',event=>{
+        const input=event.currentTarget,raw=input.value.trim(),query=digitsOnly(raw),sequence=++patientLookupSequence;
+        clearTimeout(patientLookupTimer);remotePatientLookup=null;renderPatientFiles();
+        if(query.length<6||query.length>20||!/^\\d+$/.test(query))return;
+        patientLookupTimer=setTimeout(async()=>{
+          try{
+            const result=await window.phcApi('/patients/lookup',{method:'POST',body:JSON.stringify({nationalId:query})});
+            if(sequence!==patientLookupSequence||input.value.trim()!==raw)return;
+            const patient=result.patient;remotePatientLookup={...patient,age:patientAge(patient.dateOfBirth),nationalTail:digitsOnly(patient.nationalId).slice(-4),visits:Array.isArray(patient.visits)?patient.visits:[]};
+            selectedPatientFile=patient.fileNo;renderPatientFiles();
+          }catch(error){
+            if(sequence!==patientLookupSequence||input.value.trim()!==raw)return;
+            if(error.status!==404)notify('تعذر البحث برقم الهوية في قاعدة البيانات المشتركة');
+            renderPatientFiles();
+          }
+        },350);
+      });
       document.getElementById('clearPatientsFilter').addEventListener('click',()=>{document.getElementById('patientsFilter').value='';renderPatientFiles();});
       document.getElementById('patientDirectory').addEventListener('click',event=>{const row=event.target.closest('[data-file-no]');if(row){selectedPatientFile=row.dataset.fileNo;renderPatientFiles();}});
       role.addEventListener('change',function(){
