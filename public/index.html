@@ -343,6 +343,19 @@
     #prcsClinicalConcept .immunization-page-size select{width:auto;min-width:64px;padding:6px 8px;font-size:11px}
     #prcsClinicalConcept .immunization-page-jump input{width:62px!important;height:34px;padding:5px 7px!important;text-align:center;font-size:11px}
     @media(max-width:760px){#prcsClinicalConcept .immunization-pagination{align-items:stretch;flex-direction:column}#prcsClinicalConcept .immunization-page-controls{justify-content:center}}
+    #prcsClinicalConcept .table-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 4px;color:var(--muted);font-size:11px}
+    #prcsClinicalConcept .table-pagination[hidden]{display:none}
+    #prcsClinicalConcept .table-pagination-summary{font-weight:700;white-space:nowrap}
+    #prcsClinicalConcept .table-pagination-controls{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+    #prcsClinicalConcept .table-page-button{min-width:34px;height:34px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font:inherit;cursor:pointer}
+    #prcsClinicalConcept .table-page-button:hover:not(:disabled){border-color:var(--red);color:var(--red-dark)}
+    #prcsClinicalConcept .table-page-button.active{background:var(--red);border-color:var(--red);color:#fff;font-weight:700}
+    #prcsClinicalConcept .table-page-button:disabled{opacity:.45;cursor:not-allowed}
+    #prcsClinicalConcept .table-page-gap{padding:0 3px}
+    #prcsClinicalConcept .table-pagination-size,#prcsClinicalConcept .table-pagination-jump{display:flex;align-items:center;gap:5px;margin:0;color:var(--muted);white-space:nowrap}
+    #prcsClinicalConcept .table-pagination-size select{width:auto;min-width:60px;padding:6px 8px;font-size:11px}
+    #prcsClinicalConcept .table-pagination-jump input{width:62px!important;height:34px;padding:5px 7px!important;text-align:center;font-size:11px}
+    @media(max-width:760px){#prcsClinicalConcept .table-pagination{align-items:stretch;flex-direction:column}#prcsClinicalConcept .table-pagination-controls{justify-content:center}}
     #prcsClinicalConcept .immunization-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:15px}
     #prcsClinicalConcept .immunization-stat{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff}
     #prcsClinicalConcept .immunization-stat small{display:block;color:var(--muted);font-size:10px}
@@ -1162,6 +1175,34 @@
         if(view==='referrals')renderReferrals();
         if(view==='pharmacyEntry')renderCentralCatalog();
       }
+      function setupTablePagination(){
+        const tableIds=['staffRows','allocationRows','userRows','visitRows','referralRows','labOrderRows','stockRows','centralDrugCatalog'];
+        tableIds.forEach(tableId=>{
+          const tbody=document.getElementById(tableId);if(!tbody)return;
+          const tableWrap=tbody.closest('.pharmacy-table-wrap')||tbody.closest('table')?.parentElement;if(!tableWrap)return;
+          let pager=document.getElementById(tableId+'Pagination');
+          if(!pager){pager=document.createElement('nav');pager.id=tableId+'Pagination';pager.className='table-pagination';pager.setAttribute('aria-label','التنقل بين صفحات الجدول');tableWrap.insertAdjacentElement('afterend',pager);}
+          const state={page:1,pageSize:50};
+          const update=()=>{
+            const rows=Array.from(tbody.children).filter(row=>row.tagName==='TR');
+            const pageCount=Math.max(1,Math.ceil(rows.length/state.pageSize));state.page=Math.min(Math.max(1,state.page),pageCount);
+            const start=(state.page-1)*state.pageSize;rows.forEach((row,index)=>{row.hidden=index<start||index>=start+state.pageSize;});
+            pager.hidden=rows.length<=state.pageSize;pager.replaceChildren();if(pager.hidden)return;
+            const summary=document.createElement('div');summary.className='table-pagination-summary';summary.textContent='صفحة '+state.page.toLocaleString('ar')+' من '+pageCount.toLocaleString('ar')+' · '+rows.length.toLocaleString('ar')+' سجل';
+            const controls=document.createElement('div');controls.className='table-pagination-controls';
+            const sizeLabel=document.createElement('label');sizeLabel.className='table-pagination-size';sizeLabel.textContent='عدد السجلات في الصفحة';const sizeSelect=document.createElement('select');[25,50,100,200].forEach(size=>sizeSelect.add(new Option(String(size),String(size))));sizeSelect.value=String(state.pageSize);sizeSelect.addEventListener('change',()=>{state.pageSize=Number(sizeSelect.value)||50;state.page=1;update();});sizeLabel.append(sizeSelect);controls.append(sizeLabel);
+            const button=(label,page,{active=false,disabled=false}={})=>{const el=document.createElement('button');el.type='button';el.className='table-page-button'+(active?' active':'');el.textContent=label;el.disabled=disabled||page===state.page;el.addEventListener('click',()=>{state.page=page;update();});return el;};
+            controls.append(button('الأولى',1,{disabled:state.page===1}),button('السابق',Math.max(1,state.page-1),{disabled:state.page===1}));
+            const pages=new Set([1,pageCount]);for(let page=Math.max(1,state.page-2);page<=Math.min(pageCount,state.page+2);page++)pages.add(page);
+            let previous=0;for(const page of [...pages].sort((a,b)=>a-b)){if(previous&&page-previous>1){const gap=document.createElement('span');gap.className='table-page-gap';gap.textContent='…';controls.append(gap);}const pageButton=button(String(page),page,{active:page===state.page});pageButton.setAttribute('aria-label','الصفحة '+page);if(page===state.page)pageButton.setAttribute('aria-current','page');controls.append(pageButton);previous=page;}
+            controls.append(button('التالي',Math.min(pageCount,state.page+1),{disabled:state.page===pageCount}),button('الأخيرة',pageCount,{disabled:state.page===pageCount}));
+            const jumpLabel=document.createElement('label');jumpLabel.className='table-pagination-jump';jumpLabel.textContent='رقم الصفحة';const jump=document.createElement('input');jump.type='number';jump.min='1';jump.max=String(pageCount);jump.value=String(state.page);jump.setAttribute('aria-label','الانتقال إلى رقم الصفحة');jump.addEventListener('change',()=>{state.page=Math.max(1,Math.min(pageCount,Number(jump.value)||1));update();});jumpLabel.append(jump);controls.append(jumpLabel);
+            pager.append(summary,controls);
+          };
+          const observer=new MutationObserver(records=>{if(records.some(record=>record.type==='childList'&&record.target===tbody)){state.page=1;update();}});
+          observer.observe(tbody,{childList:true});update();
+        });
+      }
       function renderVisits(){
         const serviceFilter=document.getElementById('visitServiceFilter'),oldService=serviceFilter.value;serviceFilter.replaceChildren(new Option('كل الخدمات',''));serviceCatalog.forEach(service=>serviceFilter.add(new Option(service,service)));if(serviceCatalog.includes(oldService))serviceFilter.value=oldService;
         const all=patientRecords.flatMap(patient=>patient.visits.map(visit=>({patient,visit}))),query=document.getElementById('visitSearch').value.trim().toLowerCase(),service=serviceFilter.value;
@@ -1802,6 +1843,7 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         catch(error){notify(error.status===409?'اسم المستخدم مستخدم مسبقًا.':error.payload?.error==='unknown_clinic'?'تحقق من العيادات المحددة.':'تعذر إنشاء الحساب؛ تحقق من البيانات والصلاحيات.');}
       });
       document.getElementById('refreshUsers').addEventListener('click',renderUsers);
+      setupTablePagination();
       renderManager();
       root.querySelectorAll('.nav button').forEach(b=>b.addEventListener('click',function(){
         root.querySelectorAll('.nav button').forEach(x=>x.classList.remove('active'));
