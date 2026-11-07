@@ -990,6 +990,32 @@ async function handleApi(req, res, url) {
   if (!user && !['/api/v1/interop/identity-map', '/api/v1/patients/lookup'].includes(url.pathname)) {
     return send(res, 403, { error: 'human_session_required', requestId });
   }
+  const patientIdentityMatch = req.method === 'GET' ? /^\/api\/v1\/patients\/([^/]+)\/identity$/.exec(url.pathname) : null;
+  if (patientIdentityMatch) {
+    if (!['system_admin','clinic_admin','clinician','reception','pharmacist','lab_technician'].includes(user.role)) {
+      return send(res, 403, { error: 'patient_identity_forbidden', requestId });
+    }
+    const fileNo = decodeURIComponent(patientIdentityMatch[1]);
+    const result = await pool.query(
+      `SELECT p.national_id_ciphertext,r.clinic_ref,r.payload
+         FROM app_records r
+         LEFT JOIN patients p ON p.patient_number=COALESCE(NULLIF(r.payload->>'fileNo',''),r.record_id)
+        WHERE r.resource='patients' AND r.record_id=$1`,
+      [fileNo],
+    );
+    if (!result.rows[0]) return send(res, 404, { error: 'patient_not_found', requestId });
+    if (user.role !== 'system_admin') {
+      const row = result.rows[0];
+      const clinics = (await pool.query("SELECT payload FROM app_records WHERE resource='clinics'")).rows.map((item) => item.payload);
+      const hasClinicAccess = user.clinicRefs.includes(String(row.clinic_ref || '')) ||
+        user.clinicRefs.includes(normalizedClinicRef(row.payload, clinics)) ||
+        (row.payload.visits || []).some((visit) => user.clinicRefs.includes(normalizedClinicRef(visit, clinics)));
+      if (!hasClinicAccess) return send(res, 403, { error: 'patient_outside_user_clinic', requestId });
+    }
+    const nationalId = decryptNationalId(result.rows[0].national_id_ciphertext);
+    await audit({ actorId: user.id, clinicRef: result.rows[0].clinic_ref, action: 'patient.identity.viewed', entityType: 'patient', entityId: fileNo, requestId });
+    return send(res, 200, { nationalId, requestId });
+  }
   if (req.method === 'POST' && url.pathname === '/api/v1/audit/view') {
     const body = await readJson(req);
     if (body.entityType !== 'patient' || !String(body.entityId || '').trim()) return send(res, 400, { error: 'invalid_audit_event' });
