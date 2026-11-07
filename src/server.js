@@ -1109,12 +1109,13 @@ async function handleApi(req, res, url) {
       throw error;
     } finally { client.release(); }
   }
-  if (req.method === 'GET' && url.pathname === '/api/v1/patients/lookup') {
+  if (['GET','POST'].includes(req.method) && url.pathname === '/api/v1/patients/lookup') {
     if (!user && !hasScope(integration, 'patients:lookup')) return send(res, 403, { error: 'patient_lookup_forbidden', requestId });
     if (user && !['system_admin','clinic_admin','clinician','reception','pharmacist','lab_technician'].includes(user.role)) {
       return send(res, 403, { error: 'patient_lookup_forbidden', requestId });
     }
-    const nationalId = String(url.searchParams.get('nationalId') || '').replace(/[^0-9]/g, '');
+    const lookupBody = req.method === 'POST' ? await readJson(req) : {};
+    const nationalId = String(req.method === 'POST' ? (lookupBody.nationalId || '') : (url.searchParams.get('nationalId') || '')).replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 1632)).replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 1776)).replace(/[^0-9]/g, '');
     if (nationalId.length < 6 || nationalId.length > 20) return send(res, 400, { error: 'invalid_national_id', requestId });
     const digest = hashNationalId(nationalId);
     let result = await pool.query(
