@@ -841,6 +841,120 @@ async function handleApi(req, res, url) {
     }
     return send(res, 200, await loadState(user));
   }
+  if (req.method === 'POST' && url.pathname === '/api/v1/immunizations/archive-clinic-correction') {
+    if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
+    const archiveFileName = 'vaccinations_inquiries.xlsxمواصي القرارة .xlsx';
+    const targetClinicName = 'Mawasi Al Qarara MP';
+    const clinicResult = await pool.query(
+      `SELECT c.record_id,c.payload,n.id AS normalized_clinic_id
+         FROM app_records c
+         LEFT JOIN clinics n ON n.metadata->>'appRecordId'=c.record_id
+        WHERE c.resource='clinics' AND (c.payload->>'name'=$1 OR c.payload->>'nameEn'=$1)
+        ORDER BY CASE WHEN c.payload->>'name'=$1 THEN 0 ELSE 1 END
+        LIMIT 1`,
+      [targetClinicName],
+    );
+    if (!clinicResult.rows[0]) return send(res, 404, { error: 'target_clinic_not_found', clinicName: targetClinicName, requestId });
+    if (!clinicResult.rows[0].normalized_clinic_id) return send(res, 409, { error: 'target_clinic_not_normalized', clinicName: targetClinicName, requestId });
+    const clinic = clinicResult.rows[0];
+    const clinicName = String(clinic.payload.name || targetClinicName);
+    const clinicNameAr = String(clinic.payload.nameAr || clinic.payload.name || targetClinicName);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const sourceRows = await client.query(
+        `SELECT clinic_ref,COUNT(*)::int AS count FROM app_records
+          WHERE resource='immunizations' AND payload->>'sourceArchive'=$1 GROUP BY clinic_ref`,
+        [archiveFileName],
+      );
+      const sourceDoseCount = sourceRows.rows.reduce((sum,row)=>sum+Number(row.count||0),0);
+      if (!sourceDoseCount) {
+        await client.query('ROLLBACK');
+        return send(res, 404, { error: 'archive_records_not_found', archiveFileName, requestId });
+      }
+      const movedDoses = await client.query(
+        `UPDATE app_records dose SET clinic_ref=$1,
+          payload=dose.payload || jsonb_build_object('clinic',$2::text,'clinicId',$1::text,'clinicNameAr',$3::text),
+          version=dose.version+1,updated_by=$4,updated_at=now()
+          WHERE dose.resource='immunizations' AND dose.payload->>'sourceArchive'=$5`,
+        [clinic.record_id,clinicName,clinicNameAr,user.id,archiveFileName],
+      );
+      const movedNormalizedDoses = await client.query(
+        `UPDATE immunizations normalized SET clinic_id=$1,
+          metadata=COALESCE(normalized.metadata,'{}'::jsonb) || jsonb_build_object('clinic',$2::text,'clinicId',$3::text,'clinicNameAr',$4::text)
+          FROM app_records dose
+          WHERE dose.resource='immunizations' AND dose.payload->>'sourceArchive'=$5
+            AND normalized.source_record_id=dose.record_id`,
+        [clinic.normalized_clinic_id,clinicName,clinic.record_id,clinicNameAr,archiveFileName],
+      );
+      const movedVisitRecords = await client.query(
+        `UPDATE app_records visit SET clinic_ref=$1,
+          payload=visit.payload || jsonb_build_object('clinic',$2::text,'clinicId',$1::text,'clinicNameAr',$3::text),
+          version=visit.version+1,updated_by=$4,updated_at=now()
+          WHERE visit.resource='visits' AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(COALESCE(visit.payload->'immunizationIds','[]'::jsonb)) linked(record_id)
+            JOIN app_records dose ON dose.resource='immunizations' AND dose.record_id=linked.record_id
+            WHERE dose.payload->>'sourceArchive'=$5
+          )`,
+        [clinic.record_id,clinicName,clinicNameAr,user.id,archiveFileName],
+      );
+      const movedVisits = await client.query(
+        `UPDATE visits visit SET clinic_id=$1,
+          clinical_data=COALESCE(visit.clinical_data,'{}'::jsonb) || jsonb_build_object('clinic',$2::text,'clinicId',$3::text,'clinicNameAr',$4::text)
+          WHERE EXISTS (
+            SELECT 1 FROM immunizations normalized
+            JOIN app_records dose ON dose.resource='immunizations' AND dose.record_id=normalized.source_record_id
+            WHERE normalized.visit_id=visit.id AND dose.payload->>'sourceArchive'=$5
+          )`,
+        [clinic.normalized_clinic_id,clinicName,clinic.record_id,clinicNameAr,archiveFileName],
+      );
+      const updatedPatients = await client.query(
+        `WITH source_doses AS (
+           SELECT record_id,payload->>'fileNo' AS file_no FROM app_records
+            WHERE resource='immunizations' AND payload->>'sourceArchive'=$1
+         ), source_patients AS (
+           SELECT DISTINCT file_no FROM source_doses WHERE NULLIF(file_no,'') IS NOT NULL
+         )
+         UPDATE app_records patient SET payload=jsonb_set(patient.payload,'{visits}',
+           COALESCE((
+             SELECT jsonb_agg(
+               CASE WHEN EXISTS (
+                 SELECT 1 FROM jsonb_array_elements_text(COALESCE(entry.visit->'immunizationIds','[]'::jsonb)) linked(record_id)
+                 JOIN source_doses dose ON dose.record_id=linked.record_id
+               ) THEN entry.visit || jsonb_build_object('clinic',$2::text,'clinicId',$3::text,'clinicNameAr',$4::text)
+               ELSE entry.visit END ORDER BY entry.ordinality
+             )
+             FROM jsonb_array_elements(COALESCE(patient.payload->'visits','[]'::jsonb)) WITH ORDINALITY AS entry(visit,ordinality)
+           ),'[]'::jsonb),true),
+           version=patient.version+1,updated_by=$5,updated_at=now()
+           FROM source_patients
+          WHERE patient.resource='patients' AND patient.record_id=source_patients.file_no
+            AND EXISTS (
+              SELECT 1 FROM jsonb_array_elements(COALESCE(patient.payload->'visits','[]'::jsonb)) entry(visit)
+              WHERE EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(COALESCE(entry.visit->'immunizationIds','[]'::jsonb)) linked(record_id)
+                JOIN source_doses dose ON dose.record_id=linked.record_id
+              )
+            )`,
+        [archiveFileName,clinicName,clinic.record_id,clinicNameAr,user.id],
+      );
+      await audit({
+        actorId:user.id,clinicRef:clinic.record_id,action:'immunizations.archive_clinic_correction',
+        entityType:'vaccination_archive',entityId:archiveFileName,requestId,
+        details:{archiveFileName,previousClinicRefs:[...new Set(sourceRows.rows.map(row=>String(row.clinic_ref||'')))],
+          targetClinicName:clinicName,movedDoses:movedDoses.rowCount,movedNormalizedDoses:movedNormalizedDoses.rowCount,
+          movedVisitRecords:movedVisitRecords.rowCount,movedVisits:movedVisits.rowCount,updatedPatients:updatedPatients.rowCount},
+      });
+      await client.query('COMMIT');
+      return send(res,200,{ok:true,archiveFileName,clinicName,clinicNameAr,
+        movedDoses:movedDoses.rowCount,movedNormalizedDoses:movedNormalizedDoses.rowCount,
+        movedVisitRecords:movedVisitRecords.rowCount,movedVisits:movedVisits.rowCount,updatedPatients:updatedPatients.rowCount,requestId});
+    } catch(error) {
+      await client.query('ROLLBACK').catch(()=>{});
+      console.error('Vaccination archive clinic correction failed',{requestId,code:error.code||'',constraint:error.constraint||'',message:error.message});
+      return send(res,500,{error:'archive_clinic_correction_failed',requestId,code:error.code||''});
+    } finally { client.release(); }
+  }
   if (req.method === 'POST' && url.pathname === '/api/v1/immunizations/archive-import') {
     if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });
     const body = await readJson(req, 16 * 1024 * 1024);
