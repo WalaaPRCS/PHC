@@ -331,7 +331,18 @@
     #prcsClinicalConcept .immunization-intro h2{font-size:19px;margin:0}
     #prcsClinicalConcept .immunization-intro p{font-size:11px;color:var(--muted);margin:5px 0 0}
     #prcsClinicalConcept .immunization-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-start}
-    #prcsClinicalConcept .immunization-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 4px;color:var(--muted);font-size:11px}
+    #prcsClinicalConcept .immunization-pagination{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 4px;color:var(--muted);font-size:11px;flex-wrap:wrap}
+    #prcsClinicalConcept .immunization-page-summary{font-weight:700;white-space:nowrap}
+    #prcsClinicalConcept .immunization-page-controls{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+    #prcsClinicalConcept .immunization-page-button{min-width:34px;height:34px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font:inherit;cursor:pointer}
+    #prcsClinicalConcept .immunization-page-button:hover:not(:disabled){border-color:var(--red);color:var(--red-dark)}
+    #prcsClinicalConcept .immunization-page-button.active{background:var(--red);border-color:var(--red);color:#fff;font-weight:700}
+    #prcsClinicalConcept .immunization-page-button:disabled{opacity:.45;cursor:not-allowed}
+    #prcsClinicalConcept .immunization-page-gap{padding:0 3px}
+    #prcsClinicalConcept .immunization-page-size,#prcsClinicalConcept .immunization-page-jump{display:flex;align-items:center;gap:5px;margin:0;color:var(--muted);white-space:nowrap}
+    #prcsClinicalConcept .immunization-page-size select{width:auto;min-width:64px;padding:6px 8px;font-size:11px}
+    #prcsClinicalConcept .immunization-page-jump input{width:62px!important;height:34px;padding:5px 7px!important;text-align:center;font-size:11px}
+    @media(max-width:760px){#prcsClinicalConcept .immunization-pagination{align-items:stretch;flex-direction:column}#prcsClinicalConcept .immunization-page-controls{justify-content:center}}
     #prcsClinicalConcept .immunization-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:15px}
     #prcsClinicalConcept .immunization-stat{border:1px solid var(--line);border-radius:10px;padding:12px;background:#fff}
     #prcsClinicalConcept .immunization-stat small{display:block;color:var(--muted);font-size:10px}
@@ -1401,7 +1412,7 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         document.getElementById('labEmpty').hidden=filtered.length>0;const count=status=>labOrders.filter(o=>status==='active'?o.status!=='مكتمل'&&o.status!=='تعذر إجراء الفحص':o.status===status).length;document.getElementById('labStats').innerHTML=`<div class="lab-stat"><small>كل الطلبات</small><strong>${labOrders.length}</strong></div><div class="lab-stat"><small>بانتظار الإجراء</small><strong>${count('active')}</strong></div><div class="lab-stat"><small>تحاليل مكتملة</small><strong>${count('مكتمل')}</strong></div>`;
       }
       let editingImmunizationId=null,immunizationCurrentPage=1;
-      const immunizationPageSize=100;
+      let immunizationPageSize=100;
       function saveImmunizations(){try{localStorage.setItem('prcsDemoImmunizationsV1',JSON.stringify(immunizationRecords));return true;}catch{return false;}}
       async function importVaccinationArchiveFile(file){
         if(window.phcUser?.role!=='system_admin'){notify('استيراد أرشيف التطعيمات متاح لمدير النظام فقط');return;}
@@ -1471,7 +1482,18 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         });
         document.getElementById('immunizationEmpty').hidden=visible.length>0;
         const pager=document.getElementById('immunizationPagination');pager.hidden=ordered.length<=immunizationPageSize;pager.replaceChildren();
-        if(!pager.hidden){const info=document.createElement('span');info.textContent='صفحة '+immunizationCurrentPage+' من '+pageCount+' · '+ordered.length+' سجل';const controls=document.createElement('div');controls.className='immunization-actions';const previous=document.createElement('button');previous.type='button';previous.className='btn';previous.textContent='السابق';previous.disabled=immunizationCurrentPage<=1;previous.addEventListener('click',()=>{immunizationCurrentPage--;renderImmunizations();});const next=document.createElement('button');next.type='button';next.className='btn';next.textContent='التالي';next.disabled=immunizationCurrentPage>=pageCount;next.addEventListener('click',()=>{immunizationCurrentPage++;renderImmunizations();});controls.append(previous,next);pager.append(info,controls);}
+        if(!pager.hidden){
+          const summary=document.createElement('div');summary.className='immunization-page-summary';summary.textContent='صفحة '+immunizationCurrentPage+' من '+pageCount+' · '+ordered.length.toLocaleString('ar')+' سجل';
+          const controls=document.createElement('div');controls.className='immunization-page-controls';
+          const sizeLabel=document.createElement('label');sizeLabel.className='immunization-page-size';sizeLabel.textContent='عدد السجلات في الصفحة';const sizeSelect=document.createElement('select');[50,100,200,500].forEach(size=>sizeSelect.add(new Option(String(size),String(size))));sizeSelect.value=String(immunizationPageSize);sizeSelect.addEventListener('change',()=>{immunizationPageSize=Number(sizeSelect.value)||100;immunizationCurrentPage=1;renderImmunizations();});sizeLabel.append(sizeSelect);
+          const makePageButton=(label,page,options={})=>{const button=document.createElement('button');button.type='button';button.className='immunization-page-button'+(options.active?' active':'');button.textContent=label;button.disabled=!!options.disabled||page===immunizationCurrentPage;button.setAttribute('aria-label',options.aria||('الانتقال إلى الصفحة '+page));if(options.active)button.setAttribute('aria-current','page');button.addEventListener('click',()=>{immunizationCurrentPage=page;renderImmunizations();});return button;};
+          controls.append(sizeLabel,makePageButton('الأولى',1,{disabled:immunizationCurrentPage===1}),makePageButton('السابق',Math.max(1,immunizationCurrentPage-1),{disabled:immunizationCurrentPage===1}));
+          const pageNumbers=new Set([1,pageCount]);for(let page=Math.max(1,immunizationCurrentPage-2);page<=Math.min(pageCount,immunizationCurrentPage+2);page++)pageNumbers.add(page);
+          let previousPage=0;for(const page of [...pageNumbers].sort((a,b)=>a-b)){if(previousPage&&page-previousPage>1){const gap=document.createElement('span');gap.className='immunization-page-gap';gap.textContent='…';controls.append(gap);}controls.append(makePageButton(String(page),page,{active:page===immunizationCurrentPage}));previousPage=page;}
+          controls.append(makePageButton('التالي',Math.min(pageCount,immunizationCurrentPage+1),{disabled:immunizationCurrentPage===pageCount}),makePageButton('الأخيرة',pageCount,{disabled:immunizationCurrentPage===pageCount}));
+          const jumpLabel=document.createElement('label');jumpLabel.className='immunization-page-jump';jumpLabel.textContent='اذهب إلى';const jumpInput=document.createElement('input');jumpInput.type='number';jumpInput.min='1';jumpInput.max=String(pageCount);jumpInput.value=String(immunizationCurrentPage);jumpInput.setAttribute('aria-label','رقم الصفحة');jumpInput.addEventListener('change',()=>{const target=Math.max(1,Math.min(pageCount,Number(jumpInput.value)||1));immunizationCurrentPage=target;renderImmunizations();});jumpLabel.append(jumpInput);controls.append(jumpLabel);
+          pager.append(summary,controls);
+        }
       }
       function openImmunizationDialog(record=null,administer=false){
         if(role.value==='lab'){notify('تسجيل التطعيم متاح لمقدم الخدمة أو مدير النظام');return;}
@@ -1538,9 +1560,9 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
       document.getElementById('vaccinationArchiveFile').addEventListener('change',async event=>{const file=event.target.files?.[0];event.target.value='';if(file)await importVaccinationArchiveFile(file);});
       document.getElementById('immunizationForm').addEventListener('submit',recordVaccination);
       document.getElementById('immunizationStatus').addEventListener('change',updateImmunizationRequiredFields);
-      document.getElementById('immunizationSearch').addEventListener('input',renderImmunizations);
-      document.getElementById('immunizationStatusFilter').addEventListener('change',renderImmunizations);
-      document.getElementById('immunizationClinicFilter').addEventListener('change',renderImmunizations);
+      document.getElementById('immunizationSearch').addEventListener('input',()=>{immunizationCurrentPage=1;renderImmunizations();});
+      document.getElementById('immunizationStatusFilter').addEventListener('change',()=>{immunizationCurrentPage=1;renderImmunizations();});
+      document.getElementById('immunizationClinicFilter').addEventListener('change',()=>{immunizationCurrentPage=1;renderImmunizations();});
       document.getElementById('newLabOrderBtn').addEventListener('click',()=>{renderLaboratory();const patient=document.getElementById('labPatient').value||patientRecords[0]?.fileNo;if(patient){document.getElementById('labPatient').value=patient;populateLabVisits(patient);}document.getElementById('labOrderDialog').showModal();});
       document.getElementById('labPatient').addEventListener('change',()=>populateLabVisits(document.getElementById('labPatient').value));
       document.getElementById('labSearch').addEventListener('input',renderLaboratory);document.getElementById('labStatusFilter').addEventListener('change',renderLaboratory);
