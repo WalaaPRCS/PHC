@@ -841,6 +841,99 @@ async function handleApi(req, res, url) {
           [sourceRecordIds, clinic.record_id],
         );
       }
+      const vaccinationVisits = vaccineRows.map((row) => {
+        const dose = row.payload;
+        const visitId = `vax-${row.recordId}`;
+        const visit = {
+          id: visitId, date: dose.date, clinic: dose.clinicNameAr || dose.clinic,
+          clinicId: clinic.record_id, service: 'تطعيم', type: 'إعطاء جرعة تطعيم',
+          status: 'مكتملة', provider: dose.provider || 'غير مسجل',
+          complaint: `إعطاء ${dose.vaccine} — ${dose.dose}`,
+          assessment: 'تم توثيق الجرعة ضمن سجل التطعيمات المستورد.',
+          plan: 'متابعة جدول التطعيم الوطني حسب الجرعة التالية.',
+          vitals: {}, medications: [], procedures: [`إعطاء ${dose.vaccine} — ${dose.dose}`],
+          immunizationId: row.recordId, referral: 'لا توجد إحالة مسجلة.',
+        };
+        return {
+          recordId: row.recordId, visitId, visitNumber: `${dose.fileNo}:${visitId}`,
+          fileNo: dose.fileNo, patientId: row.patientId, clinicRef: clinic.record_id,
+          date: dose.date, status: visit.status, complaint: visit.complaint,
+          assessment: visit.assessment, plan: visit.plan, payload: visit,
+        };
+      });
+      importStage = 'create_vaccination_visits';
+      if (vaccinationVisits.length) {
+        const visitJson = JSON.stringify(vaccinationVisits);
+        await client.query(
+          `WITH source_rows AS (
+             SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
+               "visitId" text,"visitNumber" text,"fileNo" text,"patientId" uuid,"clinicRef" text,
+               "date" text,"status" text,"complaint" text,"assessment" text,"plan" text,"payload" jsonb
+             )
+           )
+           INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
+           SELECT 'visits',"visitId","clinicRef","patientId",
+                  jsonb_set("payload",'{fileNo}',to_jsonb("fileNo"),true),$2,$2
+             FROM source_rows
+           ON CONFLICT(resource,record_id) DO UPDATE SET clinic_ref=EXCLUDED.clinic_ref,
+             patient_id=EXCLUDED.patient_id,payload=EXCLUDED.payload,version=app_records.version+1,
+             updated_by=EXCLUDED.updated_by,updated_at=now()`,
+          [visitJson, user.id],
+        );
+        await client.query(
+          `WITH source_rows AS (
+             SELECT "fileNo","payload" FROM jsonb_to_recordset($1::jsonb)
+               AS x("fileNo" text,"payload" jsonb)
+           ), grouped AS (
+             SELECT "fileNo",jsonb_agg("payload" ORDER BY "payload"->>'date',"payload"->>'id') AS visits
+               FROM source_rows GROUP BY "fileNo"
+           )
+           UPDATE app_records patient
+              SET payload=jsonb_set(
+                    patient.payload,'{visits}',
+                    COALESCE(patient.payload->'visits','[]'::jsonb) ||
+                    COALESCE((
+                      SELECT jsonb_agg(incoming.visit)
+                        FROM jsonb_array_elements(grouped.visits) AS incoming(visit)
+                       WHERE NOT EXISTS (
+                         SELECT 1 FROM jsonb_array_elements(COALESCE(patient.payload->'visits','[]'::jsonb)) AS prior(visit)
+                          WHERE prior.visit->>'id'=incoming.visit->>'id'
+                       )
+                    ),'[]'::jsonb),true),
+                  version=version+1,updated_by=$2,updated_at=now()
+             FROM grouped
+            WHERE patient.resource='patients' AND patient.record_id=grouped."fileNo"`,
+          [visitJson, user.id],
+        );
+        await client.query(
+          `WITH source_rows AS (
+             SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
+               "recordId" text,"visitNumber" text,"fileNo" text,"patientId" uuid,"date" text,
+               "status" text,"complaint" text,"assessment" text,"plan" text,"payload" jsonb
+             )
+           ), saved AS (
+             INSERT INTO visits(visit_number,patient_id,clinic_id,service_id,occurred_at,status,
+                                chief_complaint,assessment,plan,vitals,clinical_data)
+             SELECT x."visitNumber",p.id,c.id,s.id,
+                    COALESCE(NULLIF(x."date",'')::timestamptz,now()),x."status",
+                    x."complaint",x."assessment",x."plan",'{}'::jsonb,x.payload
+               FROM source_rows x
+               JOIN patients p ON p.patient_number=x."fileNo"
+               JOIN clinics c ON c.metadata->>'appRecordId'=$2
+               LEFT JOIN service_catalog s ON s.name='تطعيم'
+             ON CONFLICT(visit_number) DO UPDATE SET occurred_at=EXCLUDED.occurred_at,
+               status=EXCLUDED.status,chief_complaint=EXCLUDED.chief_complaint,
+               assessment=EXCLUDED.assessment,plan=EXCLUDED.plan,clinical_data=EXCLUDED.clinical_data
+             RETURNING id,visit_number
+           )
+           UPDATE immunizations i SET visit_id=v.id
+             FROM saved v
+            WHERE i.source_record_id IN (
+              SELECT x."recordId" FROM source_rows x WHERE x."visitNumber"=v.visit_number
+            )`,
+          [visitJson, clinic.record_id],
+        );
+      }
       importStage = 'audit';
       await audit({
         actorId: user.id, clinicRef: clinic.record_id, action: 'immunizations.archive_import',
@@ -1003,6 +1096,25 @@ async function handleApi(req, res, url) {
         WHERE r.resource='patients' AND r.record_id=$1`,
       [fileNo],
     );
+    if (!result.rows[0]) {
+      result = await pool.query(
+        `SELECT NULL::uuid AS id,p.record_id AS patient_number,
+                p.payload->>'name' AS full_name,NULL::text AS national_id_ciphertext,
+                NULLIF(p.payload->>'dateOfBirth','')::date AS date_of_birth,
+                p.payload->>'gender' AS gender,p.payload->>'phone' AS phone,
+                p.payload->>'alternatePhone' AS alternate_phone,p.payload->>'address' AS address,
+                p.clinic_ref,p.payload,NULL::text AS visit_number,NULL::text AS source_visit_id,
+                NULL::timestamptz AS occurred_at,NULL::text AS status,NULL::text AS service,
+                p.payload->>'clinic' AS clinic
+           FROM app_records dose
+           JOIN app_records p ON p.resource='patients' AND p.record_id=dose.payload->>'fileNo'
+          WHERE dose.resource='immunizations'
+            AND regexp_replace(COALESCE(dose.payload->>'sourcePersonId',''),'[^0-9]','','g')=$1
+          ORDER BY dose.created_at DESC
+          LIMIT 1`,
+        [nationalId],
+      );
+    }
     if (!result.rows[0]) return send(res, 404, { error: 'patient_not_found', requestId });
     if (user.role !== 'system_admin') {
       const row = result.rows[0];
