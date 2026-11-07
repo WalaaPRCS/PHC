@@ -1405,15 +1405,29 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         const reviewCount=patients.filter(patient=>patient.namePartsReviewRequired).length;
         const message='سيتم استيراد أرشيف عيادة القدس: '+patients.length+' ملف مريض و'+immunizations.length+' جرعة تطعيم. ستتم المطابقة برقم الهوية؛ الملفات الموجودة ستُحدّث بالبيانات الناقصة فقط، والجرعات المستوردة سابقًا لن تتكرر.'+(reviewCount?'\nيوجد '+reviewCount+' اسمًا يحتاج مراجعة تقسيم الاسم إلى أربعة مقاطع.':'')+'\n\nهل تريد المتابعة؟';
         if(!window.confirm(message))return;
-        notify('جارٍ استيراد أرشيف التطعيمات إلى قاعدة البيانات…');
+        const batchSize=100,batches=[];
+        const normalizePersonId=value=>String(value||'').replace(/[^0-9]/g,'');
+        for(let offset=0;offset<patients.length;offset+=batchSize){
+          const batchPatients=patients.slice(offset,offset+batchSize),ids=new Set(batchPatients.map(patient=>normalizePersonId(patient.nationalId||patient.sourcePersonId)));
+          const batchImmunizations=immunizations.filter(dose=>ids.has(normalizePersonId(dose.nationalId||dose.sourcePersonId)));
+          batches.push({patients:batchPatients,immunizations:batchImmunizations});
+        }
+        let activeBatch=0,totals={createdPatients:0,matchedPatients:0,importedDoses:0,skippedDoses:0};
         try{
-          const result=await window.phcApi('/immunizations/archive-import',{method:'POST',body:JSON.stringify(archive)});
-          notify('اكتمل الاستيراد: '+result.createdPatients+' ملفات جديدة، '+result.matchedPatients+' ملفات مطابقة، '+result.importedDoses+' جرعة أضيفت، '+result.skippedDoses+' جرعة مكررة تم تجاوزها.');
+          for(let index=0;index<batches.length;index++){
+            activeBatch=index+1;
+            const payload={...archive,...batches[index]};
+            const result=await window.phcApi('/immunizations/archive-import',{method:'POST',body:JSON.stringify(payload)});
+            for(const key of Object.keys(totals))totals[key]+=Number(result[key]||0);
+            notify('جارٍ استيراد أرشيف التطعيمات: الدفعة '+activeBatch+' من '+batches.length+'…');
+          }
+          notify('اكتمل الاستيراد: '+totals.createdPatients+' ملفات جديدة، '+totals.matchedPatients+' ملفات مطابقة، '+totals.importedDoses+' جرعة أضيفت، '+totals.skippedDoses+' جرعة مكررة تم تجاوزها.');
           setTimeout(()=>window.location.reload(),1400);
         }catch(error){
-          const reason=error.payload?.error==='al_quds_clinic_not_configured'?'عيادة القدس غير مضافة في إعدادات النظام.':error.payload?.error==='archive_clinic_must_be_al_quds'?'الملف لا يشير إلى عيادة القدس.':'تعذر استيراد الملف إلى قاعدة البيانات.';
-          notify(reason+' راجع الملف أو سجل الخادم.');
-          console.error('vaccination archive import failed',error.message);
+          const reason=error.payload?.error==='al_quds_clinic_not_configured'?'عيادة القدس غير مضافة في إعدادات النظام.':error.payload?.error==='archive_clinic_must_be_al_quds'?'الملف لا يشير إلى عيادة القدس.':error.payload?.error==='invalid_archive_patient'?'بيانات مريض غير صالحة في الملف.':error.payload?.error==='invalid_archive_immunization'?'بيانات جرعة غير صالحة في الملف.':'تعذر استيراد الدفعة '+activeBatch+' من '+batches.length+'.';
+          const reference=error.payload?.requestId?' مرجع الخطأ: '+error.payload.requestId+'.':'';
+          notify(reason+reference+' يمكنك إعادة الاستيراد بأمان؛ السجلات المضافة مسبقًا لن تتكرر.');
+          console.error('vaccination archive import failed at batch '+activeBatch,error.message,error.payload?.requestId||'');
         }
       }
       function renderImmunizations(){
