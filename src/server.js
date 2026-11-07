@@ -647,6 +647,13 @@ async function persistVaccinationVisitRows(client, rows, actorId) {
     [mappingJson],
   );
   await client.query(
+    `DELETE FROM visits old
+      WHERE old.clinical_data->>'immunizationId' IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM immunizations normalized WHERE normalized.visit_id=old.id)
+        AND NOT EXISTS (SELECT 1 FROM lab_orders lab WHERE lab.visit_id=old.id)
+        AND NOT EXISTS (SELECT 1 FROM referrals referral WHERE referral.visit_id=old.id)`,
+  );
+  await client.query(
     `DELETE FROM app_records
       WHERE resource='visits' AND payload->>'immunizationId' IS NOT NULL
         AND record_id NOT IN (SELECT item->>'visitId' FROM jsonb_array_elements($1::jsonb) AS item)`,
