@@ -50,12 +50,15 @@
   async function loadState() {
     const state = await api('/state');
     window.__phcIds = {};
+    window.__phcInitialState = {};
     applyingServerState = true;
     try {
       for (const key of Object.keys(keyResource)) {
         const value = Array.isArray(state[key]) ? state[key] : [];
         const safeValue = key === 'prcsDemoPatientRecordsV1' ? value.map((patient) => ({ ...patient, nationalId: '', nationalTail: patient.nationalTail || '' })) : value;
-        localStorage.setItem(key, JSON.stringify(safeValue));
+        window.__phcInitialState[key] = safeValue;
+        try { localStorage.setItem(key, JSON.stringify(safeValue)); }
+        catch (error) { console.warn('Local cache skipped for', key, error.name); }
         window.__phcIds[key] = safeValue.map((item) => String(item.id || item.fileNo || item.code || item.employeeCode || '')).filter(Boolean);
       }
     } finally { applyingServerState = false; }
@@ -111,7 +114,11 @@
 
   const originalSetItem = Storage.prototype.setItem;
   Storage.prototype.setItem = function (key, value) {
-    originalSetItem.call(this, key, value);
+    try { originalSetItem.call(this, key, value); }
+    catch (error) {
+      if (this !== window.localStorage || !keyResource[String(key)]) throw error;
+      console.warn('Local cache full; saving through the database instead.', String(key));
+    }
     if (this === window.localStorage) persistKey(String(key), String(value));
   };
 
