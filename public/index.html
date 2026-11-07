@@ -1397,8 +1397,10 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         let archive;
         try{archive=JSON.parse(await file.text());}catch{notify('تعذر قراءة الملف؛ تأكد أنه JSON صالح');return;}
         const patients=archive?.patients,immunizations=archive?.immunizations,source=archive?.source||{};
-        if(archive?.format!=='PRCS-PHC-PATIENT-ARCHIVE-IMPORT'||archive?.version!==1||!Array.isArray(patients)||!Array.isArray(immunizations)||source.clinicCode!=='PRCS-PHC-MAP-005'||source.clinicNameAr!=='عيادة القدس'){
-          notify('صيغة الملف أو اسم عيادة القدس غير مطابقين لقالب الاستيراد');return;
+        const clinicNames=[source.clinicNameAr,source.clinicName,source.clinicNameEn,patients?.[0]?.clinic?.nameAr,patients?.[0]?.clinic?.name,immunizations?.[0]?.clinic?.nameAr,immunizations?.[0]?.clinic?.name].map(value=>String(value||'').trim()).filter(Boolean);
+        const clinicNameMatches=!clinicNames.length||clinicNames.some(name=>name==='عيادة القدس'||name.toLowerCase()==='al quds phc');
+        if(archive?.format!=='PRCS-PHC-PATIENT-ARCHIVE-IMPORT'||archive?.version!==1||!Array.isArray(patients)||!Array.isArray(immunizations)||source.clinicCode!=='PRCS-PHC-MAP-005'||!clinicNameMatches){
+          notify('صيغة الملف أو رمز/اسم عيادة القدس غير مطابق لقالب الاستيراد');return;
         }
         const reviewCount=patients.filter(patient=>patient.namePartsReviewRequired).length;
         const message='سيتم استيراد أرشيف عيادة القدس: '+patients.length+' ملف مريض و'+immunizations.length+' جرعة تطعيم. ستتم المطابقة برقم الهوية؛ الملفات الموجودة ستُحدّث بالبيانات الناقصة فقط، والجرعات المستوردة سابقًا لن تتكرر.'+(reviewCount?'\nيوجد '+reviewCount+' اسمًا يحتاج مراجعة تقسيم الاسم إلى أربعة مقاطع.':'')+'\n\nهل تريد المتابعة؟';
