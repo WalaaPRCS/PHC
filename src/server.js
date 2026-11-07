@@ -531,6 +531,130 @@ function loginRateLimited(ip) {
   return current.count >= 10;
 }
 
+function prepareVaccinationVisitRows(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const dose = row.payload || {};
+    const fileNo = String(row.fileNo || dose.fileNo || '');
+    const clinicRef = String(row.clinicRef || dose.clinicId || '');
+    const date = String(dose.date || '').slice(0, 10);
+    if (!fileNo || !clinicRef || !date) continue;
+    const key = `${fileNo}|${clinicRef}|${date}`;
+    if (!groups.has(key)) groups.set(key, { fileNo, clinicRef, patientId: row.patientId, date, doses: [] });
+    groups.get(key).doses.push({ recordId: row.recordId, payload: dose });
+  }
+  return [...groups.values()].map((group) => {
+    group.doses.sort((a,b)=>String(a.payload.vaccine||'').localeCompare(String(b.payload.vaccine||''))||String(a.payload.dose||'').localeCompare(String(b.payload.dose||'')));
+    const visitId = `vax-day-${group.fileNo}-${group.date}-${group.clinicRef}`;
+    const doseDetails = group.doses.map(({recordId,payload})=>({
+      recordId, vaccine: payload.vaccine || 'تطعيم', vaccineCode: payload.vaccineCode || '',
+      dose: payload.dose || 'جرعة غير محددة', date: payload.date || group.date,
+      batch: payload.batch || '', provider: payload.provider || '', notes: payload.notes || '',
+    }));
+    const procedureLabels = doseDetails.map(item=>`إعطاء ${item.vaccine} — ${item.dose}`);
+    const visit = {
+      id: visitId, date: group.date, clinic: group.doses[0].payload.clinicNameAr || group.doses[0].payload.clinic,
+      clinicId: group.clinicRef, service: 'تطعيم', type: 'إعطاء تطعيمات',
+      status: 'مكتملة', provider: group.doses.find(item=>item.payload.provider)?.payload.provider || 'غير مسجل',
+      complaint: `إعطاء التطعيمات: ${doseDetails.map(item=>item.vaccine+' — '+item.dose).join('، ')}`,
+      assessment: `تم توثيق ${doseDetails.length} جرعة تطعيم في زيارة واحدة.`,
+      plan: 'متابعة جدول التطعيم الوطني حسب مواعيد الجرعات التالية.',
+      vitals: {}, medications: [], procedures: procedureLabels,
+      immunizations: doseDetails, immunizationIds: doseDetails.map(item=>item.recordId),
+      referral: 'لا توجد إحالة مسجلة.',
+    };
+    return {
+      visitId, visitNumber: `${group.fileNo}:${visitId}`, fileNo: group.fileNo,
+      patientId: group.patientId, clinicRef: group.clinicRef, date: group.date,
+      status: visit.status, complaint: visit.complaint, assessment: visit.assessment,
+      plan: visit.plan, payload: visit, recordIds: doseDetails.map(item=>item.recordId),
+    };
+  });
+}
+
+async function persistVaccinationVisitRows(client, rows, actorId) {
+  const visits = prepareVaccinationVisitRows(rows);
+  if (!visits.length) return 0;
+  const visitJson = JSON.stringify(visits);
+  const mappingJson = JSON.stringify(visits.flatMap(visit=>visit.recordIds.map(recordId=>({recordId,visitNumber:visit.visitNumber}))));
+  await client.query(
+    `WITH source_rows AS (
+       SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
+         "visitId" text,"fileNo" text,"patientId" uuid,"clinicRef" text,"payload" jsonb
+       )
+     )
+     INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
+     SELECT 'visits',"visitId","clinicRef","patientId",
+            jsonb_set("payload",'{fileNo}',to_jsonb("fileNo"),true),$2,$2
+       FROM source_rows
+     ON CONFLICT(resource,record_id) DO UPDATE SET clinic_ref=EXCLUDED.clinic_ref,
+       patient_id=EXCLUDED.patient_id,payload=EXCLUDED.payload,version=app_records.version+1,
+       updated_by=EXCLUDED.updated_by,updated_at=now()`,
+    [visitJson, actorId],
+  );
+  await client.query(
+    `WITH source_rows AS (
+       SELECT "fileNo","payload" FROM jsonb_to_recordset($1::jsonb)
+         AS x("fileNo" text,"payload" jsonb)
+     ), grouped AS (
+       SELECT "fileNo",jsonb_agg("payload" ORDER BY "payload"->>'date',"payload"->>'id') AS visits
+         FROM source_rows GROUP BY "fileNo"
+     )
+     UPDATE app_records patient
+        SET payload=jsonb_set(
+              patient.payload,'{visits}',
+              COALESCE((
+                SELECT jsonb_agg(prior.visit ORDER BY prior.ordinality)
+                  FROM jsonb_array_elements(COALESCE(patient.payload->'visits','[]'::jsonb))
+                       WITH ORDINALITY AS prior(visit,ordinality)
+                 WHERE COALESCE(prior.visit->>'immunizationId','')=''
+                   AND NOT (COALESCE(prior.visit->>'id','') LIKE 'vax-%'
+                            AND COALESCE(prior.visit->>'type','') IN ('إعطاء جرعة تطعيم','إعطاء تطعيمات'))
+              ),'[]'::jsonb) || COALESCE(grouped.visits,'[]'::jsonb),true),
+            version=version+1,updated_by=$2,updated_at=now()
+       FROM grouped
+      WHERE patient.resource='patients' AND patient.record_id=grouped."fileNo"`,
+    [visitJson, actorId],
+  );
+  await client.query(
+    `WITH source_rows AS (
+       SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
+         "visitNumber" text,"fileNo" text,"clinicRef" text,"date" text,"status" text,
+         "complaint" text,"assessment" text,"plan" text,"payload" jsonb
+       )
+     )
+     INSERT INTO visits(visit_number,patient_id,clinic_id,service_id,occurred_at,status,
+                        chief_complaint,assessment,plan,vitals,clinical_data)
+     SELECT x."visitNumber",p.id,c.id,s.id,COALESCE(NULLIF(x."date",'')::timestamptz,now()),
+            x."status",x."complaint",x."assessment",x."plan",'{}'::jsonb,x.payload
+       FROM source_rows x
+       JOIN patients p ON p.patient_number=x."fileNo"
+       JOIN clinics c ON c.metadata->>'appRecordId'=x."clinicRef"
+       LEFT JOIN service_catalog s ON s.name='تطعيم'
+     ON CONFLICT(visit_number) DO UPDATE SET clinic_id=EXCLUDED.clinic_id,
+       occurred_at=EXCLUDED.occurred_at,status=EXCLUDED.status,
+       chief_complaint=EXCLUDED.chief_complaint,assessment=EXCLUDED.assessment,
+       plan=EXCLUDED.plan,vitals=EXCLUDED.vitals,clinical_data=EXCLUDED.clinical_data`,
+    [visitJson],
+  );
+  await client.query(
+    `WITH mappings AS (
+       SELECT * FROM jsonb_to_recordset($1::jsonb) AS x("recordId" text,"visitNumber" text)
+     )
+     UPDATE immunizations normalized SET visit_id=vis.id
+       FROM mappings map JOIN visits vis ON vis.visit_number=map."visitNumber"
+      WHERE normalized.source_record_id=map."recordId"`,
+    [mappingJson],
+  );
+  await client.query(
+    `DELETE FROM app_records
+      WHERE resource='visits' AND payload->>'immunizationId' IS NOT NULL
+        AND record_id NOT IN (SELECT jsonb_array_elements($1::jsonb)->>'visitId')`,
+    [visitJson],
+  );
+  return visits.length;
+}
+
 async function backfillImportedVaccinationVisits(actorId) {
   const client = await pool.connect();
   try {
@@ -538,122 +662,44 @@ async function backfillImportedVaccinationVisits(actorId) {
     const { rows } = await client.query(
       `SELECT dose.record_id AS "recordId",dose.clinic_ref AS "clinicRef",dose.patient_id AS "patientId",
               COALESCE(NULLIF(dose.payload->>'fileNo',''),patient.record_id) AS "fileNo",
-              dose.payload AS payload
+              dose.payload AS payload,patient.payload AS "patientPayload",
+              normalized.visit_id AS "visitId",linked.visit_number AS "linkedVisitNumber"
          FROM app_records dose
          JOIN app_records patient ON patient.resource='patients'
           AND patient.record_id=COALESCE(NULLIF(dose.payload->>'fileNo',''),dose.record_id)
+         LEFT JOIN immunizations normalized ON normalized.source_record_id=dose.record_id
+         LEFT JOIN visits linked ON linked.id=normalized.visit_id
         WHERE dose.resource='immunizations'
           AND dose.payload->>'status'='أُعطي'
           AND dose.payload ? 'sourcePersonId'
-          AND (
-            NOT EXISTS (SELECT 1 FROM app_records visit
-                         WHERE visit.resource='visits' AND visit.record_id=('vax-'||dose.record_id))
-            OR NOT EXISTS (
-              SELECT 1 FROM jsonb_array_elements(COALESCE(patient.payload->'visits','[]'::jsonb)) prior(visit)
-               WHERE prior.visit->>'id'=('vax-'||dose.record_id)
-            )
-            OR EXISTS (SELECT 1 FROM immunizations normalized
-                        WHERE normalized.source_record_id=dose.record_id AND normalized.visit_id IS NULL)
-          )
         ORDER BY dose.record_id`,
     );
     if (!rows.length) { await client.query('COMMIT'); return 0; }
-    const visits = rows.map((row) => {
-      const dose = row.payload || {};
-      const id = `vax-${row.recordId}`;
-      const visit = {
-        id, date: dose.date, clinic: dose.clinicNameAr || dose.clinic,
-        clinicId: row.clinicRef || dose.clinicId, service: 'تطعيم', type: 'إعطاء جرعة تطعيم',
-        status: 'مكتملة', provider: dose.provider || 'غير مسجل',
-        complaint: `إعطاء ${dose.vaccine || 'تطعيم'} — ${dose.dose || 'جرعة غير محددة'}`,
-        assessment: 'تم توثيق الجرعة ضمن سجل التطعيمات المستورد.',
-        plan: 'متابعة جدول التطعيم الوطني حسب الجرعة التالية.',
-        vitals: {}, medications: [], procedures: [`إعطاء ${dose.vaccine || 'تطعيم'} — ${dose.dose || 'جرعة غير محددة'}`],
-        immunizationId: row.recordId, referral: 'لا توجد إحالة مسجلة.',
-      };
-      return {
-        recordId: row.recordId, visitId: id, visitNumber: `${row.fileNo}:${id}`,
-        fileNo: row.fileNo, patientId: row.patientId, clinicRef: row.clinicRef,
-        date: String(dose.date || ''), status: visit.status,
-        complaint: visit.complaint, assessment: visit.assessment, plan: visit.plan, payload: visit,
-      };
+    const mappedRows=rows.map(row=>({...row,recordId:row.recordId,fileNo:row.fileNo,clinicRef:row.clinicRef}));
+    const grouped=prepareVaccinationVisitRows(mappedRows);
+    if(!grouped.length){await client.query('COMMIT');return 0;}
+    const expectedIds=grouped.map(item=>item.visitId);
+    const existing=await client.query(`SELECT record_id FROM app_records WHERE resource='visits' AND record_id=ANY($1::text[])`,[expectedIds]);
+    const existingIds=new Set(existing.rows.map(row=>row.record_id));
+    const groupByKey=new Map(grouped.map(item=>[`${item.fileNo}|${item.clinicRef}|${item.date}`,item]));
+    const needsRepair=rows.some(row=>{
+      const date=String(row.payload?.date||'').slice(0,10);
+      const group=groupByKey.get(`${row.fileNo}|${row.clinicRef}|${date}`);
+      if(!group||!existingIds.has(group.visitId))return true;
+      const patientVisits=Array.isArray(row.patientPayload?.visits)?row.patientPayload.visits:[];
+      if(!patientVisits.some(visit=>visit.id===group.visitId))return true;
+      return row.linkedVisitNumber!==group.visitNumber;
     });
-    const visitJson = JSON.stringify(visits);
-    await client.query(
-      `WITH source_rows AS (
-         SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
-           "visitId" text,"fileNo" text,"patientId" uuid,"clinicRef" text,"payload" jsonb
-         )
-       )
-       INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
-       SELECT 'visits',"visitId","clinicRef","patientId",
-              jsonb_set("payload",'{fileNo}',to_jsonb("fileNo"),true),$2,$2
-         FROM source_rows
-       ON CONFLICT(resource,record_id) DO UPDATE SET clinic_ref=EXCLUDED.clinic_ref,
-         patient_id=EXCLUDED.patient_id,payload=EXCLUDED.payload,version=app_records.version+1,
-         updated_by=EXCLUDED.updated_by,updated_at=now()`,
-      [visitJson, actorId],
-    );
-    await client.query(
-      `WITH source_rows AS (
-         SELECT "fileNo","payload" FROM jsonb_to_recordset($1::jsonb)
-           AS x("fileNo" text,"payload" jsonb)
-       ), grouped AS (
-         SELECT "fileNo",jsonb_agg("payload" ORDER BY "payload"->>'date',"payload"->>'id') AS visits
-           FROM source_rows GROUP BY "fileNo"
-       )
-       UPDATE app_records patient
-          SET payload=jsonb_set(
-                patient.payload,'{visits}',
-                COALESCE(patient.payload->'visits','[]'::jsonb) ||
-                COALESCE((
-                  SELECT jsonb_agg(incoming.visit)
-                    FROM jsonb_array_elements(grouped.visits) AS incoming(visit)
-                   WHERE NOT EXISTS (
-                     SELECT 1 FROM jsonb_array_elements(COALESCE(patient.payload->'visits','[]'::jsonb)) AS prior(visit)
-                      WHERE prior.visit->>'id'=incoming.visit->>'id'
-                   )
-                ),'[]'::jsonb),true),
-              version=version+1,updated_by=$2,updated_at=now()
-         FROM grouped
-        WHERE patient.resource='patients' AND patient.record_id=grouped."fileNo"`,
-      [visitJson, actorId],
-    );
-    await client.query(
-      `WITH source_rows AS (
-         SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
-           "recordId" text,"visitNumber" text,"fileNo" text,"clinicRef" text,"date" text,"status" text,
-           "complaint" text,"assessment" text,"plan" text,"payload" jsonb
-         )
-       ), saved AS (
-         INSERT INTO visits(visit_number,patient_id,clinic_id,service_id,occurred_at,status,
-                            chief_complaint,assessment,plan,vitals,clinical_data)
-         SELECT x."visitNumber",p.id,c.id,s.id,
-                COALESCE(NULLIF(x."date",'')::timestamptz,now()),x."status",
-                x."complaint",x."assessment",x."plan",'{}'::jsonb,x.payload
-           FROM source_rows x
-           JOIN patients p ON p.patient_number=x."fileNo"
-           JOIN clinics c ON c.metadata->>'appRecordId'=x."clinicRef"
-           LEFT JOIN service_catalog s ON s.name='تطعيم'
-         ON CONFLICT(visit_number) DO UPDATE SET occurred_at=EXCLUDED.occurred_at,
-           status=EXCLUDED.status,chief_complaint=EXCLUDED.chief_complaint,
-           assessment=EXCLUDED.assessment,plan=EXCLUDED.plan,clinical_data=EXCLUDED.clinical_data
-         RETURNING id,visit_number
-       )
-       UPDATE immunizations normalized SET visit_id=saved.id
-         FROM saved
-        WHERE normalized.source_record_id IN (
-          SELECT x."recordId" FROM source_rows x WHERE x."visitNumber"=saved.visit_number
-        )`,
-      [visitJson],
-    );
+    if(!needsRepair){await client.query('COMMIT');return 0;}
+    const count=await persistVaccinationVisitRows(client,mappedRows,actorId);
     await client.query('COMMIT');
-    return rows.length;
+    return count;
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;
   } finally { client.release(); }
 }
+
 
 async function handleApi(req, res, url) {
   if (!assertSameOrigin(req, res)) return;
@@ -973,99 +1019,12 @@ async function handleApi(req, res, url) {
           [sourceRecordIds, clinic.record_id],
         );
       }
-      const vaccinationVisits = vaccineRows.map((row) => {
-        const dose = row.payload;
-        const visitId = `vax-${row.recordId}`;
-        const visit = {
-          id: visitId, date: dose.date, clinic: dose.clinicNameAr || dose.clinic,
-          clinicId: clinic.record_id, service: 'تطعيم', type: 'إعطاء جرعة تطعيم',
-          status: 'مكتملة', provider: dose.provider || 'غير مسجل',
-          complaint: `إعطاء ${dose.vaccine} — ${dose.dose}`,
-          assessment: 'تم توثيق الجرعة ضمن سجل التطعيمات المستورد.',
-          plan: 'متابعة جدول التطعيم الوطني حسب الجرعة التالية.',
-          vitals: {}, medications: [], procedures: [`إعطاء ${dose.vaccine} — ${dose.dose}`],
-          immunizationId: row.recordId, referral: 'لا توجد إحالة مسجلة.',
-        };
-        return {
-          recordId: row.recordId, visitId, visitNumber: `${dose.fileNo}:${visitId}`,
-          fileNo: dose.fileNo, patientId: row.patientId, clinicRef: clinic.record_id,
-          date: dose.date, status: visit.status, complaint: visit.complaint,
-          assessment: visit.assessment, plan: visit.plan, payload: visit,
-        };
-      });
       importStage = 'create_vaccination_visits';
-      if (vaccinationVisits.length) {
-        const visitJson = JSON.stringify(vaccinationVisits);
-        await client.query(
-          `WITH source_rows AS (
-             SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
-               "visitId" text,"visitNumber" text,"fileNo" text,"patientId" uuid,"clinicRef" text,
-               "date" text,"status" text,"complaint" text,"assessment" text,"plan" text,"payload" jsonb
-             )
-           )
-           INSERT INTO app_records(resource,record_id,clinic_ref,patient_id,payload,created_by,updated_by)
-           SELECT 'visits',"visitId","clinicRef","patientId",
-                  jsonb_set("payload",'{fileNo}',to_jsonb("fileNo"),true),$2,$2
-             FROM source_rows
-           ON CONFLICT(resource,record_id) DO UPDATE SET clinic_ref=EXCLUDED.clinic_ref,
-             patient_id=EXCLUDED.patient_id,payload=EXCLUDED.payload,version=app_records.version+1,
-             updated_by=EXCLUDED.updated_by,updated_at=now()`,
-          [visitJson, user.id],
-        );
-        await client.query(
-          `WITH source_rows AS (
-             SELECT "fileNo","payload" FROM jsonb_to_recordset($1::jsonb)
-               AS x("fileNo" text,"payload" jsonb)
-           ), grouped AS (
-             SELECT "fileNo",jsonb_agg("payload" ORDER BY "payload"->>'date',"payload"->>'id') AS visits
-               FROM source_rows GROUP BY "fileNo"
-           )
-           UPDATE app_records patient
-              SET payload=jsonb_set(
-                    patient.payload,'{visits}',
-                    COALESCE(patient.payload->'visits','[]'::jsonb) ||
-                    COALESCE((
-                      SELECT jsonb_agg(incoming.visit)
-                        FROM jsonb_array_elements(grouped.visits) AS incoming(visit)
-                       WHERE NOT EXISTS (
-                         SELECT 1 FROM jsonb_array_elements(COALESCE(patient.payload->'visits','[]'::jsonb)) AS prior(visit)
-                          WHERE prior.visit->>'id'=incoming.visit->>'id'
-                       )
-                    ),'[]'::jsonb),true),
-                  version=version+1,updated_by=$2,updated_at=now()
-             FROM grouped
-            WHERE patient.resource='patients' AND patient.record_id=grouped."fileNo"`,
-          [visitJson, user.id],
-        );
-        await client.query(
-          `WITH source_rows AS (
-             SELECT * FROM jsonb_to_recordset($1::jsonb) AS x(
-               "recordId" text,"visitNumber" text,"fileNo" text,"patientId" uuid,"date" text,
-               "status" text,"complaint" text,"assessment" text,"plan" text,"payload" jsonb
-             )
-           ), saved AS (
-             INSERT INTO visits(visit_number,patient_id,clinic_id,service_id,occurred_at,status,
-                                chief_complaint,assessment,plan,vitals,clinical_data)
-             SELECT x."visitNumber",p.id,c.id,s.id,
-                    COALESCE(NULLIF(x."date",'')::timestamptz,now()),x."status",
-                    x."complaint",x."assessment",x."plan",'{}'::jsonb,x.payload
-               FROM source_rows x
-               JOIN patients p ON p.patient_number=x."fileNo"
-               JOIN clinics c ON c.metadata->>'appRecordId'=$2
-               LEFT JOIN service_catalog s ON s.name='تطعيم'
-             ON CONFLICT(visit_number) DO UPDATE SET occurred_at=EXCLUDED.occurred_at,
-               status=EXCLUDED.status,chief_complaint=EXCLUDED.chief_complaint,
-               assessment=EXCLUDED.assessment,plan=EXCLUDED.plan,clinical_data=EXCLUDED.clinical_data
-             RETURNING id,visit_number
-           )
-           UPDATE immunizations i SET visit_id=v.id
-             FROM saved v
-            WHERE i.source_record_id IN (
-              SELECT x."recordId" FROM source_rows x WHERE x."visitNumber"=v.visit_number
-            )`,
-          [visitJson, clinic.record_id],
-        );
-      }
+      await persistVaccinationVisitRows(
+        client,
+        vaccineRows.map((row) => ({ ...row, clinicRef: clinic.record_id, fileNo: row.payload.fileNo })),
+        user.id,
+      );
       importStage = 'audit';
       await audit({
         actorId: user.id, clinicRef: clinic.record_id, action: 'immunizations.archive_import',
