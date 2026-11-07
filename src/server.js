@@ -852,12 +852,30 @@ async function handleApi(req, res, url) {
     }
     const source = body.source || {};
     const clinicCode = String(source.clinicCode || '').trim();
-    if (clinicCode !== 'PRCS-PHC-MAP-005') return send(res, 400, { error: 'archive_clinic_must_be_al_quds', requestId });
+    const clinicId = String(source.clinicId || source.clinic?.id || '').trim();
+    const clinicNames = [...new Set([
+      source.clinicName, source.clinicNameAr, source.clinicNameEn,
+      source.clinic?.name, source.clinic?.nameAr, source.clinic?.nameEn,
+    ].map(value => String(value || '').trim()).filter(Boolean))];
+    if (!clinicCode && !clinicId && !clinicNames.length) return send(res, 400, { error: 'invalid_archive_clinic', requestId });
     const clinicResult = await pool.query(
-      "SELECT record_id,payload FROM app_records WHERE resource='clinics' AND (record_id=$1 OR payload->>'code'=$2) ORDER BY CASE WHEN record_id=$1 THEN 0 ELSE 1 END LIMIT 1",
-      [String(source.clinicId || 'clinic-map-2026-005'), clinicCode],
+      `SELECT record_id,payload FROM app_records
+        WHERE resource='clinics' AND (
+          ($1::text <> '' AND record_id=$1::text)
+          OR ($2::text <> '' AND payload->>'code'=$2::text)
+          OR (cardinality($3::text[]) > 0 AND (
+            payload->>'name'=ANY($3::text[]) OR payload->>'nameAr'=ANY($3::text[]) OR payload->>'nameEn'=ANY($3::text[])
+          ))
+        )
+        ORDER BY CASE
+          WHEN $1::text <> '' AND record_id=$1::text THEN 0
+          WHEN $2::text <> '' AND payload->>'code'=$2::text THEN 1
+          ELSE 2
+        END, created_at
+        LIMIT 1`,
+      [clinicId, clinicCode, clinicNames],
     );
-    if (!clinicResult.rows[0]) return send(res, 400, { error: 'al_quds_clinic_not_configured', requestId });
+    if (!clinicResult.rows[0]) return send(res, 400, { error: 'archive_clinic_not_configured', clinicNames, clinicCode, requestId });
     const clinic = clinicResult.rows[0];
     const archivePatients = [];
     const patientIds = new Set();
@@ -988,7 +1006,7 @@ async function handleApi(req, res, url) {
           provider: '',
           notes: '',
           clinic: clinic.payload.name,
-          clinicNameAr: 'عيادة القدس',
+          clinicNameAr: clinic.payload.nameAr || clinic.payload.name || source.clinicNameAr || source.clinicName || '',
           clinicId: clinic.record_id,
           sourceArchive: source.fileName || 'vaccinations_inquiries',
           sourcePersonId: dose.sourcePersonId || dose.nationalId,
