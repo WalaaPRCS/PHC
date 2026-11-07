@@ -1409,13 +1409,13 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         let archive;
         try{archive=JSON.parse(await file.text());}catch{notify('تعذر قراءة الملف؛ تأكد أنه JSON صالح');return;}
         const patients=archive?.patients,immunizations=archive?.immunizations,source=archive?.source||{};
-        const clinicNames=[source.clinicNameAr,source.clinicName,source.clinicNameEn,patients?.[0]?.clinic?.nameAr,patients?.[0]?.clinic?.name,immunizations?.[0]?.clinic?.nameAr,immunizations?.[0]?.clinic?.name].map(value=>String(value||'').trim()).filter(Boolean);
-        const clinicNameMatches=!clinicNames.length||clinicNames.some(name=>name==='عيادة القدس'||name.toLowerCase()==='al quds phc');
-        if(archive?.format!=='PRCS-PHC-PATIENT-ARCHIVE-IMPORT'||archive?.version!==1||!Array.isArray(patients)||!Array.isArray(immunizations)||source.clinicCode!=='PRCS-PHC-MAP-005'||!clinicNameMatches){
-          notify('صيغة الملف أو رمز/اسم عيادة القدس غير مطابق لقالب الاستيراد');return;
+        const clinicNames=[source.clinicNameAr,source.clinicName,source.clinicNameEn,source.clinic?.nameAr,source.clinic?.name,source.clinic?.nameEn,patients?.[0]?.clinic?.nameAr,patients?.[0]?.clinic?.name,immunizations?.[0]?.clinic?.nameAr,immunizations?.[0]?.clinic?.name].map(value=>String(value||'').trim()).filter(Boolean);
+        const clinicDisplayName=source.clinicNameAr||source.clinicName||source.clinicNameEn||source.clinic?.nameAr||source.clinic?.name||clinicNames[0]||'العيادة المحددة في الملف';
+        if(archive?.format!=='PRCS-PHC-PATIENT-ARCHIVE-IMPORT'||archive?.version!==1||!Array.isArray(patients)||!Array.isArray(immunizations)||patients.length<1||!clinicNames.length){
+          notify('صيغة الملف أو اسم العيادة غير مطابق لقالب الاستيراد');return;
         }
         const reviewCount=patients.filter(patient=>patient.namePartsReviewRequired).length;
-        const message='سيتم استيراد أرشيف عيادة القدس: '+patients.length+' ملف مريض و'+immunizations.length+' جرعة تطعيم. ستتم المطابقة برقم الهوية؛ الملفات الموجودة ستُحدّث بالبيانات الناقصة فقط، والجرعات المستوردة سابقًا لن تتكرر.'+(reviewCount?'\nيوجد '+reviewCount+' اسمًا يحتاج مراجعة تقسيم الاسم إلى أربعة مقاطع.':'')+'\n\nهل تريد المتابعة؟';
+        const message='سيتم استيراد أرشيف '+clinicDisplayName+': '+patients.length+' ملف مريض و'+immunizations.length+' جرعة تطعيم. ستتم المطابقة برقم الهوية؛ الملفات الموجودة ستُحدّث بالبيانات الناقصة فقط، والجرعات المستوردة سابقًا لن تتكرر.'+(reviewCount?'\\nيوجد '+reviewCount+' اسمًا يحتاج مراجعة تقسيم الاسم إلى أربعة مقاطع.':'')+'\\n\\nهل تريد المتابعة؟';
         if(!window.confirm(message))return;
         const batchSize=100,batches=[];
         const normalizePersonId=value=>String(value||'').replace(/[^0-9]/g,'');
@@ -1436,7 +1436,7 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
           notify('اكتمل الاستيراد: '+totals.createdPatients+' ملفات جديدة، '+totals.matchedPatients+' ملفات مطابقة، '+totals.importedDoses+' جرعة أضيفت، '+totals.skippedDoses+' جرعة مكررة تم تجاوزها.');
           setTimeout(()=>window.location.reload(),1400);
         }catch(error){
-          const reason=error.payload?.error==='al_quds_clinic_not_configured'?'عيادة القدس غير مضافة في إعدادات النظام.':error.payload?.error==='archive_clinic_must_be_al_quds'?'الملف لا يشير إلى عيادة القدس.':error.payload?.error==='invalid_archive_patient'?'بيانات مريض غير صالحة في الملف.':error.payload?.error==='invalid_archive_immunization'?'بيانات جرعة غير صالحة في الملف.':'تعذر استيراد الدفعة '+activeBatch+' من '+batches.length+'.';
+          const reason=error.payload?.error==='archive_clinic_not_configured'?'العيادة المحددة في الملف غير مضافة في إعدادات النظام.':error.payload?.error==='invalid_archive_clinic'?'اسم العيادة أو رمزها غير موجود في الملف.':error.payload?.error==='invalid_archive_patient'?'بيانات مريض غير صالحة في الملف.':error.payload?.error==='invalid_archive_immunization'?'بيانات جرعة غير صالحة في الملف.':'تعذر استيراد الدفعة '+activeBatch+' من '+batches.length+'.';
           const stage=error.payload?.stage?' المرحلة: '+error.payload.stage+'.':'';
           const code=error.payload?.code?' رمز قاعدة البيانات: '+error.payload.code+'.':'';
           const reference=error.payload?.requestId?' مرجع الخطأ: '+error.payload.requestId+'.':'';
