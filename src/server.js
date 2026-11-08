@@ -18,14 +18,14 @@ const stateKeys = {
   allocations: 'prcsDemoAllocationsV1', patients: 'prcsDemoPatientRecordsV1',
   immunizations: 'prcsDemoImmunizationsV1', visits: 'prcsDemoVisitsV1', queue: 'prcsDemoQueueV1',
   pharmacy_stock: 'prcsDemoPharmacyStockV1', dispenses: 'prcsDemoDispenseRecordsV1',
-  drug_catalog: 'prcsDemoDrugCatalogV1', lab_orders: 'prcsDemoLabOrdersV1',
+  drug_catalog: 'prcsDemoDrugCatalogV1', central_warehouse_stock: 'prcsDemoCentralWarehouseStockV1', lab_orders: 'prcsDemoLabOrdersV1',
 };
 const writeRoles = {
   clinics: ['system_admin'], staff: ['system_admin', 'clinic_admin'], projects: ['system_admin'],
   allocations: ['system_admin'], patients: ['system_admin', 'clinic_admin', 'clinician', 'reception', 'pharmacist', 'lab_technician'],
   immunizations: ['system_admin', 'clinic_admin', 'clinician'], visits: ['system_admin', 'clinic_admin', 'clinician'],
   queue: ['system_admin', 'clinic_admin', 'reception'], pharmacy_stock: ['system_admin'],
-  dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin'],
+  dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin'], central_warehouse_stock: ['system_admin'],
   lab_orders: ['system_admin', 'clinic_admin', 'clinician', 'lab_technician'],
 };
 const readRoles = {
@@ -35,7 +35,7 @@ const readRoles = {
   patients: ['system_admin', 'clinic_admin', 'clinician', 'reception', 'pharmacist', 'lab_technician', 'viewer'],
   immunizations: ['system_admin', 'clinic_admin', 'clinician', 'viewer'], visits: ['system_admin', 'clinic_admin', 'clinician', 'pharmacist', 'lab_technician', 'viewer'],
   queue: ['system_admin', 'clinic_admin', 'reception'], pharmacy_stock: ['system_admin', 'clinic_admin', 'pharmacist'],
-  dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin', 'clinic_admin', 'pharmacist'],
+  dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin', 'clinic_admin', 'pharmacist'], central_warehouse_stock: ['system_admin'],
   lab_orders: ['system_admin', 'clinic_admin', 'clinician', 'lab_technician', 'viewer'],
 };
 const authFailures = new Map();

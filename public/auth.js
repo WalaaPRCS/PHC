@@ -7,6 +7,7 @@
     prcsDemoImmunizationsV1: 'immunizations', prcsDemoVisitsV1: 'visits',
     prcsDemoQueueV1: 'queue', prcsDemoPharmacyStockV1: 'pharmacy_stock',
     prcsDemoDispenseRecordsV1: 'dispenses', prcsDemoDrugCatalogV1: 'drug_catalog',
+    prcsDemoCentralWarehouseStockV1: 'central_warehouse_stock',
     prcsDemoLabOrdersV1: 'lab_orders',
   };
   const clientWriteRoles = {
@@ -14,7 +15,7 @@
     allocations: ['system_admin'], patients: ['system_admin', 'clinic_admin', 'clinician', 'reception', 'pharmacist', 'lab_technician'],
     immunizations: ['system_admin', 'clinic_admin', 'clinician'], visits: ['system_admin', 'clinic_admin', 'clinician'],
     queue: ['system_admin', 'clinic_admin', 'reception'], pharmacy_stock: ['system_admin'],
-    dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin'],
+    dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin'], central_warehouse_stock: ['system_admin'],
     lab_orders: ['system_admin', 'clinic_admin', 'clinician', 'lab_technician'],
   };
   let writeChain = Promise.resolve();
