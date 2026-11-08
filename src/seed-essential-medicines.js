@@ -5,6 +5,15 @@ export async function seedEssentialMedicines(pool, syncNormalized) {
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['prcs-essential-medicines-v1']);
+    // Remove only the three pharmacy examples shown in the old demo catalog,
+    // including their synthetic quantities and dispense record. Never touch
+    // real stock or any other medicine records.
+    const demoDrugIds = ['drug-demo-paracetamol', 'drug-demo-amoxicillin', 'drug-demo-ors'];
+    const demoStockIds = ['stock-demo-paracetamol-ram', 'stock-demo-amoxicillin-ram', 'stock-demo-ors-nab'];
+    await client.query("DELETE FROM dispensations WHERE source_record_id='dispense-demo-001'");
+    await client.query("DELETE FROM pharmacy_stock WHERE source_record_id=ANY($1::text[])", [demoStockIds]);
+    await client.query("DELETE FROM drug_catalog WHERE source_record_id=ANY($1::text[])", [demoDrugIds]);
+    await client.query("DELETE FROM app_records WHERE (resource='dispenses' AND record_id='dispense-demo-001') OR (resource='pharmacy_stock' AND record_id=ANY($1::text[])) OR (resource='drug_catalog' AND record_id=ANY($2::text[]))", [demoStockIds, demoDrugIds]);
     const marker = await client.query("SELECT 1 FROM app_records WHERE resource='system_meta' AND record_id='essential-medicines-v1'");
     if (marker.rowCount) { await client.query('COMMIT'); return false; }
     for (const medicine of essentialMedicines) {
