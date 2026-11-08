@@ -8,6 +8,7 @@ import { pool, audit } from './db.js';
 import { hashPassword, verifyPassword, opaqueToken, tokenHash, encryptNationalId, decryptNationalId, hashNationalId } from './security.js';
 import { seedDemoData } from './demo-data.js';
 import { seedClinicMappingData } from './clinic-mapping-data.js';
+import { seedEssentialMedicines } from './seed-essential-medicines.js';
 
 const root = fileURLToPath(new URL('../public/', import.meta.url));
 const sessionDurationMs = 8 * 60 * 60 * 1000;
@@ -297,12 +298,12 @@ async function syncNormalized(client, resource, payload, recordId) {
   }
   if (resource === 'drug_catalog') {
     await client.query(
-      `INSERT INTO drug_catalog(source_record_id,code,generic_name,brand_name,strength,dosage_form,unit,aliases,metadata,active)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,true)
+      `INSERT INTO drug_catalog(source_record_id,code,generic_name,brand_name,strength,dosage_form,unit,category,aliases,metadata,active)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,true)
        ON CONFLICT(source_record_id) DO UPDATE SET code=EXCLUDED.code,generic_name=EXCLUDED.generic_name,
         brand_name=EXCLUDED.brand_name,strength=EXCLUDED.strength,dosage_form=EXCLUDED.dosage_form,unit=EXCLUDED.unit,
-        aliases=EXCLUDED.aliases,metadata=EXCLUDED.metadata,active=true`,
-      [recordId, String(payload.code || recordId), payload.generic || payload.name || recordId, payload.name || null, payload.strength || null, payload.form || null, payload.sourceUnit || null, payload.aliases || [], JSON.stringify(payload)],
+        category=EXCLUDED.category,aliases=EXCLUDED.aliases,metadata=EXCLUDED.metadata,active=true`,
+      [recordId, String(payload.code || recordId), payload.generic || payload.name || recordId, payload.name || null, payload.strength || null, payload.form || null, payload.sourceUnit || null, payload.category || null, payload.aliases || [], JSON.stringify(payload)],
     );
   }
   if (resource === 'pharmacy_stock') {
@@ -1627,6 +1628,11 @@ async function main() {
     if (await seedClinicMappingData(pool, syncNormalized)) console.log('Imported mapped PRCS clinics and services');
   } catch (error) {
     console.error('Clinic mapping import could not be loaded; application startup will continue:', error.message);
+  }
+  try {
+    if (await seedEssentialMedicines(pool, syncNormalized)) console.log('Loaded essential medicines catalog (93 items; stock quantities unchanged)');
+  } catch (error) {
+    console.error('Essential medicines catalog could not be loaded; application startup will continue:', error.message);
   }
   const server = createServer(async (req, res) => {
     try {
