@@ -48,7 +48,9 @@
   }
 
   async function loadState() {
-    const state = await api('/state');
+    const initialResources = ['clinics', 'staff', 'projects', 'allocations'];
+    const state = await api(`/state?resources=${encodeURIComponent(initialResources.join(','))}`);
+    window.__phcLoadedResources = new Set(initialResources);
     window.__phcIds = {};
     window.__phcInitialState = {};
     applyingServerState = true;
@@ -63,6 +65,29 @@
       }
     } finally { applyingServerState = false; }
   }
+
+  window.phcEnsureStateResources = async function (resources) {
+    const loaded = window.__phcLoadedResources || new Set();
+    const missing = [...new Set(resources)].filter((resource) => !loaded.has(resource));
+    if (!missing.length) return;
+    const state = await api(`/state?resources=${encodeURIComponent(missing.join(','))}`);
+    applyingServerState = true;
+    try {
+      for (const [key, resource] of Object.entries(keyResource)) {
+        if (!missing.includes(resource)) continue;
+        const value = Array.isArray(state[key]) ? state[key] : [];
+        const safeValue = key === 'prcsDemoPatientRecordsV1'
+          ? value.map((patient) => ({ ...patient, nationalId: '', nationalTail: patient.nationalTail || '' }))
+          : value;
+        window.__phcInitialState[key] = safeValue;
+        localStorage.setItem(key, JSON.stringify(safeValue));
+        window.__phcIds[key] = safeValue.map((item) => String(item.id || item.fileNo || item.code || item.employeeCode || '')).filter(Boolean);
+        loaded.add(resource);
+      }
+      window.__phcLoadedResources = loaded;
+    } finally { applyingServerState = false; }
+    window.__phcOnStateResourcesLoaded?.(missing);
+  };
 
   async function authenticated(user) {
     activeUser = user;

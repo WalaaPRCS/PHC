@@ -149,11 +149,12 @@ function canWriteResource(user, resource) {
   return writeRoles[resource]?.includes(user.role) || false;
 }
 
-async function loadState(user) {
+async function loadState(user, requestedResources = null) {
   const result = {};
   const clinicRes = await pool.query("SELECT record_id,payload FROM app_records WHERE resource='clinics'");
   const clinics = clinicRes.rows.map((row) => row.payload);
   for (const [resource, storageKey] of Object.entries(stateKeys)) {
+    if (requestedResources && !requestedResources.has(resource)) continue;
     if (!canReadResource(user, resource)) { result[storageKey] = []; continue; }
     const { rows } = await pool.query('SELECT record_id, clinic_ref, payload FROM app_records WHERE resource=$1', [resource]);
     let visible = rows;
@@ -819,27 +820,10 @@ async function handleApi(req, res, url) {
   if (!user && !integration) return send(res, 401, { error: 'authentication_required', requestId });
   if (req.method === 'GET' && url.pathname === '/api/v1/state') {
     if (!user) return send(res, 403, { error: 'human_session_required', requestId });
-    if (user.role === 'system_admin') {
-      try {
-        if (await seedDemoData(pool, syncNormalized)) console.log('Loaded clearly labeled demo records during admin state load');
-      } catch (error) {
-        console.error('Demo data retry failed:', error.message);
-      }
-      try {
-        if (await seedClinicMappingData(pool, syncNormalized)) console.log('Imported mapped PRCS clinics during admin state load');
-      } catch (error) {
-        console.error('Clinic mapping import retry failed:', error.message);
-      }
-    }
-    if (user.role === 'system_admin') {
-      try {
-        const repairedVaccinationVisits = await backfillImportedVaccinationVisits(user.id);
-        if (repairedVaccinationVisits) console.log(`Linked ${repairedVaccinationVisits} archived vaccination doses to patient visits`);
-      } catch (error) {
-        console.error('Vaccination visit backfill failed; state loading will continue:', error.message);
-      }
-    }
-    return send(res, 200, await loadState(user));
+    const requested = url.searchParams.has('resources')
+      ? new Set(url.searchParams.get('resources').split(',').map((item) => item.trim()).filter((item) => Object.hasOwn(stateKeys, item)))
+      : null;
+    return send(res, 200, await loadState(user, requested));
   }
   if (req.method === 'POST' && url.pathname === '/api/v1/immunizations/archive-clinic-correction') {
     if (!user || user.role !== 'system_admin') return send(res, 403, { error: 'system_admin_required', requestId });

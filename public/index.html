@@ -1135,6 +1135,31 @@
       let drugCatalog=loadDemoState('prcsDemoDrugCatalogV1',[]);
       let pharmacyStock=loadDemoState('prcsDemoPharmacyStockV1',[]);
       let dispenseRecords=loadDemoState('prcsDemoDispenseRecordsV1',[]);
+      window.__phcOnStateResourcesLoaded=function(resources){
+        const loaded=new Set(resources);
+        if(loaded.has('clinics'))clinicRecords=loadDemoState('prcsDemoClinicsV1',[]);
+        if(loaded.has('staff'))staffRecords=loadDemoState('prcsDemoStaffV1',[]);
+        if(loaded.has('projects'))projects=loadDemoState('prcsDemoProjectsV1',[]);
+        if(loaded.has('allocations'))allocations=loadDemoState('prcsDemoAllocationsV1',[]);
+        if(loaded.has('patients')){patientRecords=loadDemoState('prcsDemoPatientRecordsV1',[]);patientRecords.forEach(patient=>(patient.visits||[]).forEach((visit,index)=>{if(!visit.id)visit.id=`${patient.fileNo}-visit-${index+1}`;}));}
+        if(loaded.has('visits')){enteredVisits=loadDemoState('prcsDemoVisitsV1',[]);enteredVisits.forEach(visit=>{const patient=patientRecords.find(item=>item.fileNo===visit.fileNo);if(patient&&!patient.visits.some(item=>item.id===visit.id))patient.visits.push(visit);});}
+        if(loaded.has('immunizations')){immunizationRecords=loadDemoState('prcsDemoImmunizationsV1',[]);restoreImmunizationVisits();}
+        if(loaded.has('queue'))queueTickets=loadDemoState('prcsDemoQueueV1',[]);
+        if(loaded.has('lab_orders'))labOrders=loadDemoState('prcsDemoLabOrdersV1',[]);
+        if(loaded.has('drug_catalog'))drugCatalog=loadDemoState('prcsDemoDrugCatalogV1',[]);
+        if(loaded.has('pharmacy_stock'))pharmacyStock=loadDemoState('prcsDemoPharmacyStockV1',[]);
+        if(loaded.has('dispenses'))dispenseRecords=loadDemoState('prcsDemoDispenseRecordsV1',[]);
+        if(loaded.has('clinics')||loaded.has('staff')||loaded.has('projects')||loaded.has('allocations'))renderManager();
+        if(activeView==='patients')renderPatientFiles();else if(activeView==='visits')renderVisits();else if(activeView==='immunizations')renderImmunizations();else if(activeView==='laboratory')renderLaboratory();else if(activeView==='referrals')renderReferrals();else if(activeView==='pharmacy')renderPharmacy();else if(activeView==='pharmacyEntry')renderCentralCatalog();
+      };
+      const viewResources={
+        patient:['queue'], patients:['patients','visits','immunizations'], visits:['patients','visits'],
+        immunizations:['patients','visits','immunizations'], laboratory:['patients','visits','lab_orders'],
+        referrals:['patients','visits'], pharmacy:['patients','visits','pharmacy_stock','drug_catalog','dispenses'],
+        pharmacyEntry:['pharmacy_stock','drug_catalog'], clinics:['clinics','staff','projects','allocations'],
+        staff:['clinics','staff'], projects:['clinics','projects','allocations'],
+      };
+      let viewLoadSequence=0;
       let pendingDrugImport=[];
       let selectedPatientFile='';
       let activeProfilePatient=null;
@@ -1142,6 +1167,8 @@
       function setAppView(view){
         if(view==='pharmacyEntry'&&role.value!=='manager'){view='pharmacy';notify('إدارة الأدوية وإضافة المخزون متاحة لمدير النظام فقط');}
         activeView=view;
+        const loadSequence=++viewLoadSequence;
+        if(viewResources[view]&&window.phcEnsureStateResources)window.phcEnsureStateResources(viewResources[view]).catch(error=>{if(loadSequence===viewLoadSequence)notify('تعذر تحميل بيانات الشاشة. تحقق من الاتصال ثم أعد فتحها.');console.error('PHC screen data load failed',view,error.message);});
         patientHome.classList.toggle('is-hidden',view!=='patient');
         patientsView.classList.toggle('is-visible',view==='patients');
         usersView.classList.toggle('is-visible',view==='users');
