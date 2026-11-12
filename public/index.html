@@ -1159,6 +1159,7 @@
         if(loaded.has('allocations'))allocations=loadDemoState('prcsDemoAllocationsV1',[]);
         if(loaded.has('patients')){patientRecords=loadDemoState('prcsDemoPatientRecordsV1',[]);patientRecords.forEach(patient=>(patient.visits||[]).forEach((visit,index)=>{if(!visit.id)visit.id=`${patient.fileNo}-visit-${index+1}`;}));}
         if(loaded.has('visits')){enteredVisits=loadDemoState('prcsDemoVisitsV1',[]);enteredVisits.forEach(visit=>{const patient=patientRecords.find(item=>item.fileNo===visit.fileNo);if(patient&&!patient.visits.some(item=>item.id===visit.id))patient.visits.push(visit);});}
+        if(loaded.has('patients')||loaded.has('visits'))window.phcRefreshStateSnapshot?.('prcsDemoPatientRecordsV1',patientRecords);
         if(loaded.has('immunizations')){immunizationRecords=loadDemoState('prcsDemoImmunizationsV1',[]);restoreImmunizationVisits();}
         if(loaded.has('queue'))queueTickets=loadDemoState('prcsDemoQueueV1',[]);
         if(loaded.has('lab_orders'))labOrders=loadDemoState('prcsDemoLabOrdersV1',[]);

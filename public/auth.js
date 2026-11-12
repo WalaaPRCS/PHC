@@ -18,6 +18,7 @@
     dispenses: ['system_admin', 'clinic_admin', 'pharmacist'], drug_catalog: ['system_admin'], central_warehouse_stock: ['system_admin'],
     lab_orders: ['system_admin', 'clinic_admin', 'clinician', 'lab_technician'],
   };
+  const largeClinicalResources = new Set(['patients', 'visits', 'immunizations', 'lab_orders', 'dispenses']);
   let writeChain = Promise.resolve();
   let applyingServerState = false;
   let activeUser = null;
@@ -60,9 +61,11 @@
         const value = Array.isArray(state[key]) ? state[key] : [];
         const safeValue = key === 'prcsDemoPatientRecordsV1' ? value.map((patient) => ({ ...patient, nationalId: '', nationalTail: patient.nationalTail || '' })) : value;
         window.__phcInitialState[key] = safeValue;
-        try { localStorage.setItem(key, JSON.stringify(safeValue)); }
-        catch (error) { console.warn('Local cache skipped for', key, error.name); }
-        window.__phcIds[key] = safeValue.map((item) => String(item.id || item.fileNo || item.code || item.employeeCode || '')).filter(Boolean);
+        if (!largeClinicalResources.has(keyResource[key])) {
+          try { localStorage.setItem(key, JSON.stringify(safeValue)); }
+          catch (error) { console.warn('Local cache skipped for', key, error.name); }
+        } else { try { localStorage.removeItem(key); } catch {} }
+        indexRecords(key, safeValue);
       }
     } finally { applyingServerState = false; }
   }
@@ -81,14 +84,34 @@
           ? value.map((patient) => ({ ...patient, nationalId: '', nationalTail: patient.nationalTail || '' }))
           : value;
         window.__phcInitialState[key] = safeValue;
-        localStorage.setItem(key, JSON.stringify(safeValue));
-        window.__phcIds[key] = safeValue.map((item) => String(item.id || item.fileNo || item.code || item.employeeCode || '')).filter(Boolean);
+        if (!largeClinicalResources.has(resource)) localStorage.setItem(key, JSON.stringify(safeValue));
+        else { try { localStorage.removeItem(key); } catch {} }
+        indexRecords(key, safeValue);
         loaded.add(resource);
       }
       window.__phcLoadedResources = loaded;
     } finally { applyingServerState = false; }
     window.__phcOnStateResourcesLoaded?.(missing);
   };
+
+  function recordId(record) {
+    return String(record?.id || record?.fileNo || record?.code || record?.employeeCode || '');
+  }
+
+  function indexRecords(key, records) {
+    const snapshots = {};
+    const ids = [];
+    for (const record of records) {
+      const id = recordId(record);
+      if (!id) continue;
+      ids.push(id);
+      snapshots[id] = JSON.stringify(record);
+    }
+    window.__phcIds[key] = ids;
+    window.__phcRecordSnapshots ||= {};
+    window.__phcRecordSnapshots[key] = snapshots;
+  }
+  window.phcRefreshStateSnapshot = indexRecords;
 
   async function authenticated(user) {
     activeUser = user;
@@ -117,17 +140,33 @@
     let records;
     try { records = JSON.parse(rawValue); } catch { return; }
     if (!Array.isArray(records)) return;
+    window.__phcInitialState ||= {};
+    window.__phcInitialState[key] = records;
+    const previousSnapshots = window.__phcRecordSnapshots?.[key] || {};
+    const nextSnapshots = {};
+    const changedRecords = [];
+    const nextIds = new Set();
+    for (const record of records) {
+      const id = recordId(record);
+      if (!id) continue;
+      nextIds.add(id);
+      const snapshot = JSON.stringify(record);
+      nextSnapshots[id] = snapshot;
+      if (previousSnapshots[id] !== snapshot) changedRecords.push(record);
+    }
+    if (!changedRecords.length && nextIds.size === Object.keys(previousSnapshots).length) return;
     const next = writeChain.then(async () => {
       setSyncStatus('pending', 'جاري حفظ التغييرات…');
       const priorIds = new Set((window.__phcIds?.[key] || []).map(String));
-      const nextIds = new Set(records.map((item) => String(item.id || item.fileNo || item.code || item.employeeCode || '')).filter(Boolean));
       // Patient history is append/update only; deleting a directory row must never erase a medical record.
       const deletedIds = resource === 'patients' || resource === 'visits' ? [] : [...priorIds].filter((id) => !nextIds.has(id));
       // Pharmacist inventory balances are changed only by the server's atomic dispense transaction.
       if (resource === 'pharmacy_stock' && activeUser.role !== 'system_admin') return;
-      await api(`/records/${resource}`, { method: 'PUT', body: JSON.stringify({ records, deletedIds }) });
+      await api(`/records/${resource}`, { method: 'PUT', body: JSON.stringify({ records: largeClinicalResources.has(resource) ? changedRecords : records, deletedIds }) });
       window.__phcIds ||= {};
       window.__phcIds[key] = [...nextIds];
+      window.__phcRecordSnapshots ||= {};
+      window.__phcRecordSnapshots[key] = nextSnapshots;
       setSyncStatus('ok', 'حُفظت التغييرات في قاعدة البيانات');
     }).catch((error) => {
       setSyncStatus('error', 'تعذر الاتصال بقاعدة البيانات');
@@ -140,10 +179,13 @@
 
   const originalSetItem = Storage.prototype.setItem;
   Storage.prototype.setItem = function (key, value) {
-    try { originalSetItem.call(this, key, value); }
+    const resource = keyResource[String(key)];
+    try {
+      if (this !== window.localStorage || !largeClinicalResources.has(resource)) originalSetItem.call(this, key, value);
+    }
     catch (error) {
       if (this !== window.localStorage || !keyResource[String(key)]) throw error;
-      console.warn('Local cache full; saving through the database instead.', String(key));
+      console.warn('Large clinical records are kept in memory and saved to the database.', String(key));
     }
     if (this === window.localStorage) persistKey(String(key), String(value));
   };
