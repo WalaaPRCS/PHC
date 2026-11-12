@@ -275,6 +275,25 @@
     #prcsClinicalConcept .visit-stat{background:#fff;border:1px solid var(--line);border-radius:11px;padding:12px 14px}
     #prcsClinicalConcept .visit-stat small{display:block;color:var(--muted);font-size:10px}
     #prcsClinicalConcept .visit-stat strong{display:block;font-size:18px;margin-top:4px}
+    #prcsClinicalConcept .reports-view{display:none}
+    #prcsClinicalConcept .reports-view.is-visible{display:block}
+    #prcsClinicalConcept .reports-intro{display:flex;justify-content:space-between;align-items:flex-start;gap:15px;margin-bottom:16px}
+    #prcsClinicalConcept .reports-intro h2{font-size:19px;margin:0}
+    #prcsClinicalConcept .reports-intro p{font-size:11px;color:var(--muted);margin:5px 0 0}
+    #prcsClinicalConcept .reports-filter-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;align-items:end}
+    #prcsClinicalConcept .reports-filter-grid>div{min-width:0}
+    #prcsClinicalConcept .reports-filter-grid input,#prcsClinicalConcept .reports-filter-grid select{width:100%}
+    #prcsClinicalConcept .reports-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    #prcsClinicalConcept .reports-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0}
+    #prcsClinicalConcept .report-stat{background:#fff;border:1px solid var(--line);border-radius:11px;padding:12px 14px}
+    #prcsClinicalConcept .report-stat small{display:block;color:var(--muted);font-size:10px}
+    #prcsClinicalConcept .report-stat strong{display:block;font-size:18px;margin-top:4px}
+    #prcsClinicalConcept .reports-table-wrap{overflow:auto;border:1px solid var(--line);border-radius:10px;background:#fff}
+    #prcsClinicalConcept .reports-table{width:100%;min-width:850px;border-collapse:collapse;font-size:11px}
+    #prcsClinicalConcept .reports-table th,#prcsClinicalConcept .reports-table td{padding:10px 12px;border-bottom:1px solid #e9edf2;text-align:right;vertical-align:top}
+    #prcsClinicalConcept .reports-table th{background:#f5f8fb;color:#526174;white-space:nowrap}
+    #prcsClinicalConcept .reports-pagination{display:flex;justify-content:space-between;align-items:center;gap:10px;padding-top:12px;color:var(--muted);font-size:11px}
+    #prcsClinicalConcept .reports-pagination[hidden]{display:none}
     #prcsClinicalConcept .visit-toolbar{display:flex;gap:9px;margin:12px 0;flex-wrap:wrap}
     #prcsClinicalConcept .visit-toolbar input{flex:1;min-width:180px}
     #prcsClinicalConcept .visit-status-tag{display:inline-flex;padding:3px 7px;border-radius:99px;background:#e8f6ef;color:#1d7a4b;font-size:9px}
@@ -320,7 +339,8 @@
     .queue-ticket-instruction{margin-top:15px;padding:9px;border-radius:8px;background:#fff5f4;color:#8f1b17;font-size:11px;font-weight:700}
     @media print{body *{visibility:hidden!important}#queueTicketDialog,#queueTicketDialog *{visibility:visible!important}#queueTicketDialog{display:block!important;position:absolute!important;inset:0 auto auto 0!important;margin:0!important;width:78mm!important;max-width:78mm!important;max-height:none!important;overflow:visible!important;padding:0!important;border:0!important;border-radius:0!important;box-shadow:none!important;background:white!important}#queueTicketDialog::backdrop{display:none!important}#queueTicketDialog .modal-head,#queueTicketDialog .modal-actions{display:none!important}#queueTicketContent{padding:0!important}.queue-ticket{border:1px dashed #555;border-radius:0;padding:12px;font-family:Arial,sans-serif}}
     @media(max-width:850px){#prcsClinicalConcept .visit-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
-    @media(max-width:560px){#prcsClinicalConcept .visits-intro{flex-direction:column}#newVisitDialog .visit-vitals-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:850px){#prcsClinicalConcept .reports-filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}#prcsClinicalConcept .reports-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:560px){#prcsClinicalConcept .visits-intro,#prcsClinicalConcept .reports-intro{flex-direction:column}#prcsClinicalConcept .reports-filter-grid{grid-template-columns:1fr}#newVisitDialog .visit-vitals-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     #prcsClinicalConcept .staff-manager-section[hidden]{display:none}
     #prcsClinicalConcept .staff-toolbar{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:10px 0 14px;flex-wrap:wrap}
     #prcsClinicalConcept .staff-toolbar select{min-width:220px}
@@ -719,6 +739,27 @@
           <section class="patients-panel"><div class="panel-head"><div><div class="panel-title">الزيارات المسجلة</div><div class="panel-sub">كل زيارة مرتبطة برقم ملف المريض والعيادة والخدمة</div></div></div>
             <div class="visit-toolbar"><input id="visitSearch" type="search" placeholder="ابحث باسم المريض أو رقم الملف أو التشخيص" aria-label="البحث في الزيارات"><select id="visitServiceFilter" aria-label="تصفية حسب الخدمة"><option value="">كل الخدمات</option></select></div>
             <div class="pharmacy-table-wrap"><table class="pharmacy-table"><thead><tr><th>التاريخ</th><th>المريض / رقم الملف</th><th>الخدمة والتشخيص</th><th>العيادة</th><th>المشروع / المؤشر</th><th>إجراء</th></tr></thead><tbody id="visitRows"></tbody></table><div id="visitEmpty" class="empty-state" hidden>لا توجد زيارات مطابقة.</div></div>
+          </section>
+        </div>
+        <div id="reportsView" class="reports-view" aria-live="polite">
+          <div class="reports-intro"><div><h2>التقارير والمؤشرات</h2><p>استخرج تقارير الزيارات والتطعيمات والمختبر والصيدلية والإحالات ضمن صلاحياتك.</p></div><span class="scope-badge">البيانات ضمن نطاق العيادات المسموح بها</span></div>
+          <section class="patients-panel">
+            <div class="reports-filter-grid">
+              <div><label for="reportType">نوع التقرير</label><select id="reportType"></select></div>
+              <div><label for="reportClinic">العيادة</label><select id="reportClinic"></select></div>
+              <div><label for="reportFrom">من تاريخ</label><input id="reportFrom" type="date"></div>
+              <div><label for="reportTo">إلى تاريخ</label><input id="reportTo" type="date"></div>
+              <div><label for="reportStatus">الحالة</label><select id="reportStatus"><option value="">كل الحالات</option></select></div>
+              <div><label for="reportSearch">بحث</label><input id="reportSearch" type="search" placeholder="اسم المريض أو رقم الملف أو التفاصيل"></div>
+            </div>
+            <div class="reports-actions"><button id="runReport" class="btn primary" type="button">عرض التقرير</button><button id="exportReport" class="btn" type="button" disabled>تصدير CSV لبرنامج Excel</button><button id="printReport" class="btn" type="button" disabled>طباعة / PDF</button></div>
+          </section>
+          <div id="reportStats" class="reports-stats" hidden></div>
+          <section id="reportResult" class="patients-panel" hidden>
+            <div class="panel-head"><div><div id="reportHeading" class="panel-title">نتائج التقرير</div><div id="reportSubtitle" class="panel-sub"></div></div></div>
+            <div class="reports-table-wrap"><table class="reports-table"><thead id="reportHead"></thead><tbody id="reportRows"></tbody></table></div>
+            <div id="reportEmpty" class="empty-state" hidden>لا توجد بيانات مطابقة للفلاتر.</div>
+            <nav id="reportPagination" class="reports-pagination" aria-label="التنقل بين صفحات التقرير" hidden></nav>
           </section>
         </div>
         <div id="immunizationsView" class="immunizations-view" aria-live="polite">
@@ -1129,6 +1170,7 @@
       const patientsView=document.getElementById('patientsView');
       const usersView=document.getElementById('usersView');
       const visitsView=document.getElementById('visitsView');
+      const reportsView=document.getElementById('reportsView');
       const pharmacyView=document.getElementById('pharmacyView');
       const pharmacyEntryView=document.getElementById('pharmacyEntryView');
       const laboratoryView=document.getElementById('laboratoryView');
@@ -1180,7 +1222,7 @@
         if(loaded.has('central_warehouse_stock'))centralWarehouseStock=loadDemoState('prcsDemoCentralWarehouseStockV1',[]);
         if(loaded.has('dispenses'))dispenseRecords=loadDemoState('prcsDemoDispenseRecordsV1',[]);
         if(loaded.has('clinics')||loaded.has('staff')||loaded.has('projects')||loaded.has('allocations'))renderManager();
-        if(activeView==='patients')renderPatientFiles();else if(activeView==='visits')renderVisits();else if(activeView==='immunizations')renderImmunizations();else if(activeView==='laboratory')renderLaboratory();else if(activeView==='referrals')renderReferrals();else if(activeView==='pharmacy')renderPharmacy();else if(activeView==='pharmacyEntry'){renderCentralCatalog();renderCentralWarehouse();}
+        if(activeView==='patients')renderPatientFiles();else if(activeView==='visits')renderVisits();else if(activeView==='immunizations')renderImmunizations();else if(activeView==='laboratory')renderLaboratory();else if(activeView==='referrals')renderReferrals();else if(activeView==='pharmacy')renderPharmacy();else if(activeView==='reports')populateReportClinics();else if(activeView==='pharmacyEntry'){renderCentralCatalog();renderCentralWarehouse();}
       };
       const viewResources={
         patient:['queue'], patients:['patients','visits','immunizations'], visits:['patients','visits'],
@@ -1188,6 +1230,7 @@
         referrals:['patients','visits'], pharmacy:['patients','visits','pharmacy_stock','drug_catalog','dispenses'],
         pharmacyEntry:['pharmacy_stock','drug_catalog','central_warehouse_stock'], clinics:['clinics','staff','projects','allocations'],
         staff:['clinics','staff'], projects:['clinics','projects','allocations'],
+        reports:['clinics'],
       };
       let viewLoadSequence=0;
       let pendingDrugImport=[];
@@ -1203,6 +1246,7 @@
         patientsView.classList.toggle('is-visible',view==='patients');
         usersView.classList.toggle('is-visible',view==='users');
         visitsView.classList.toggle('is-visible',view==='visits');
+        reportsView.classList.toggle('is-visible',view==='reports');
         pharmacyView.classList.toggle('is-visible',view==='pharmacy');
         pharmacyEntryView.classList.toggle('is-visible',view==='pharmacyEntry');
         laboratoryView.classList.toggle('is-visible',view==='laboratory');
@@ -1212,6 +1256,7 @@
         topSearch.classList.toggle('is-hidden',view!=='patient');
         if(view==='patient')document.getElementById('pageTitle').innerHTML='لوحة العيادة<small>إدارة المراجعين والزيارات اليومية</small>';
         if(view==='visits')document.getElementById('pageTitle').innerHTML='الزيارات<small>تسجيل ومراجعة السجلات السريرية</small>';
+        if(view==='reports')document.getElementById('pageTitle').innerHTML='التقارير والمؤشرات<small>تقارير قابلة للتصفية والتصدير ضمن نطاق الصلاحيات</small>';
         if(view==='patients')document.getElementById('pageTitle').innerHTML='ملفات المرضى<small>سجل موحد وزيارات عبر العيادات</small>';
         if(view==='users')document.getElementById('pageTitle').innerHTML='المستخدمون والصلاحيات<small>حسابات دخول ونطاق العيادات</small>';
         if(view==='pharmacy')document.getElementById('pageTitle').innerHTML='الصيدلية وصرف الأدوية<small>إدارة المخزون وربط الصرف بملف المريض</small>';
@@ -1227,6 +1272,7 @@
         if(view==='patients')renderPatientFiles();
         if(view==='users')renderUsers();
         if(view==='visits')renderVisits();
+        if(view==='reports')initializeReports();
         if(view==='pharmacy')renderPharmacy();
         if(view==='laboratory')renderLaboratory();
         if(view==='immunizations')renderImmunizations();
@@ -1261,6 +1307,35 @@
           observer.observe(tbody,{childList:true});update();
         });
       }
+      const reportDefinitions={
+        visits:{label:'الزيارات',resources:['patients','visits'],roles:['system_admin','clinic_admin','clinician','pharmacist','lab_technician','viewer'],columns:['التاريخ','المريض','رقم الملف','العيادة','الخدمة','التشخيص / سبب الزيارة','الحالة'],date:x=>x.date,status:x=>x.status||'مكتملة'},
+        immunizations:{label:'التطعيمات',resources:['patients','immunizations'],roles:['system_admin','clinic_admin','clinician','viewer'],columns:['التاريخ / الموعد','المريض','رقم الملف','العيادة','اللقاح','الجرعة','الحالة','التشغيلة'],date:x=>x.date||x.dueDate,status:x=>x.status||'—'},
+        lab_orders:{label:'طلبات المختبر',resources:['patients','visits','lab_orders'],roles:['system_admin','clinic_admin','clinician','lab_technician','viewer'],columns:['تاريخ الطلب','المريض','رقم الملف','العيادة','التحليل','الأولوية','الحالة','النتيجة'],date:x=>x.requestedAt,status:x=>x.status||'—'},
+        dispenses:{label:'صرف الأدوية',resources:['patients','visits','dispenses'],roles:['system_admin','clinic_admin','pharmacist'],columns:['التاريخ','المريض','رقم الملف','العيادة','الدواء','التركيز','الكمية','الوحدة'],date:x=>x.date,status:()=>''},
+        referrals:{label:'الإحالات',resources:['patients','visits'],roles:['system_admin','clinic_admin','clinician','pharmacist','lab_technician','viewer'],columns:['التاريخ','المريض','رقم الملف','العيادة','الجهة المحال إليها','الاختصاص','الأولوية','الحالة'],date:x=>x.date,status:x=>x.status||'مفتوحة'}
+      };
+      let reportRows=[],reportPage=1,reportPageSize=50,reportColumns=[],reportTitle='';
+      function reportDateKey(value){if(!value)return '';const d=new Date(value);return Number.isNaN(d.getTime())?'':`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
+      function populateReportClinics(){const select=document.getElementById('reportClinic'),old=select.value;select.replaceChildren(new Option('كل العيادات ضمن الصلاحية',''));assignedClinics().forEach(c=>select.add(new Option(c.name,c.id)));if(assignedClinics().some(c=>c.id===old))select.value=old;}
+      function initializeReports(){
+        const type=document.getElementById('reportType'),allowed=Object.entries(reportDefinitions).filter(([,d])=>d.roles.includes(window.phcUser?.role));
+        const old=type.value;type.replaceChildren(...allowed.map(([key,d])=>new Option(d.label,key)));if(allowed.some(([key])=>key===old))type.value=old;
+        const today=new Date(),monthStart=new Date(today.getFullYear(),today.getMonth(),1),iso=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        const from=document.getElementById('reportFrom'),to=document.getElementById('reportTo');if(!from.value)from.value=iso(monthStart);if(!to.value)to.value=iso(today);populateReportClinics();updateReportStatuses();
+      }
+      function updateReportStatuses(){const select=document.getElementById('reportStatus'),key=document.getElementById('reportType').value,current=select.value;select.replaceChildren(new Option('كل الحالات',''));let values=[];if(key==='visits')values=['مكتملة','مجدولة','ملغاة'];if(key==='immunizations')values=['أُعطي','مجدول','مؤجل','رفض','موانع'];if(key==='lab_orders')values=['مطلوب','قيد الفحص','مكتمل','تعذر إجراء الفحص'];if(key==='referrals')values=['مفتوحة','قيد المتابعة','مكتملة','ملغاة'];values.forEach(v=>select.add(new Option(v,v)));if(values.includes(current))select.value=current;}
+      function reportPatientName(fileNo,fallback=''){return patientRecords.find(p=>p.fileNo===fileNo)?.name||fallback||'—';}
+      function buildReportData(key){const clinicId=document.getElementById('reportClinic').value,from=document.getElementById('reportFrom').value,to=document.getElementById('reportTo').value,status=document.getElementById('reportStatus').value,query=document.getElementById('reportSearch').value.trim().toLocaleLowerCase(),clinicAllowed=(id,name)=>window.phcUser?.role==='system_admin'||(window.phcUser?.clinicRefs||[]).includes(id||clinicRecords.find(c=>c.name===name)?.id||''),matches=(row,date,clinic,statusValue,hay)=>{const day=reportDateKey(date);return (!clinicId||clinicId===(clinicRecords.find(c=>c.name===clinic)?.id||row.clinicId))&&clinicAllowed(row.clinicId,clinic)&&(!from||!day||day>=from)&&(!to||!day||day<=to)&&(!status||status===statusValue)&&(!query||hay.toLocaleLowerCase().includes(query));};
+        if(key==='visits')return patientRecords.flatMap(p=>(p.visits||[]).filter(v=>matches(v,v.date,v.clinic,v.status,`${p.name} ${p.fileNo} ${v.service||''} ${v.diagnosis||''} ${v.complaint||''}`)).map(v=>[patientDate(v.date),p.name,p.fileNo,v.clinic||'—',v.service||'—',v.diagnosis||v.complaint||v.type||'—',v.status||'مكتملة']));
+        if(key==='immunizations')return immunizationRecords.filter(x=>matches(x,x.date||x.dueDate,x.clinic,x.status,`${reportPatientName(x.fileNo)} ${x.fileNo} ${x.vaccine||''} ${x.dose||''} ${x.batch||''}`)).map(x=>[x.date||x.dueDate||'—',reportPatientName(x.fileNo),x.fileNo,x.clinic||'—',x.vaccine||'—',x.dose||'—',x.status||'—',x.batch||'—']);
+        if(key==='lab_orders')return labOrders.filter(x=>matches(x,x.requestedAt,x.clinic,x.status,`${x.patientName||reportPatientName(x.fileNo)} ${x.fileNo} ${x.testName||''} ${x.resultValue||''}`)).map(x=>[patientDate(x.requestedAt),x.patientName||reportPatientName(x.fileNo),x.fileNo,x.clinic||'—',x.testName||'—',x.priority||'—',x.status||'—',[x.resultValue,x.resultUnit].filter(Boolean).join(' ')||'—']);
+        if(key==='dispenses')return dispenseRecords.filter(x=>matches(x,x.date,x.clinic,'',`${x.patientName||reportPatientName(x.fileNo)} ${x.fileNo} ${x.drugName||''} ${x.strength||''}`)).map(x=>[patientDate(x.date),x.patientName||reportPatientName(x.fileNo),x.fileNo,x.clinic||'—',x.drugName||'—',x.strength||'—',x.quantity??'—',x.unit||'—']);
+        return getReferralEntries().filter(e=>matches({clinicId:e.visit.clinicId},e.referral.createdAt||e.visit.date,e.visit.clinic,e.referral.status||'مفتوحة',`${e.patient.name} ${e.patient.fileNo} ${e.referral.destination||''} ${e.referral.type||''} ${e.visit.service||''}`)).map(e=>[patientDate(e.referral.createdAt||e.visit.date),e.patient.name,e.patient.fileNo,e.visit.clinic||'—',e.referral.destination||e.referral.targetService||'—',e.referral.type||'—',e.referral.urgency||'اعتيادية',e.referral.status||'مفتوحة']);
+      }
+      async function runReport(){const key=document.getElementById('reportType').value,definition=reportDefinitions[key];if(!definition)return;const run=document.getElementById('runReport');run.disabled=true;run.textContent='جارٍ تجهيز التقرير…';try{await window.phcEnsureStateResources?.(definition.resources);reportColumns=definition.columns;reportTitle=definition.label;reportRows=buildReportData(key);reportPage=1;renderReportResults();}catch(error){notify('تعذر تحميل بيانات التقرير. أعد المحاولة بعد التحقق من الاتصال.');console.error('report load failed',key,error.message);}finally{run.disabled=false;run.textContent='عرض التقرير';}}
+      function renderReportResults(){const result=document.getElementById('reportResult'),stats=document.getElementById('reportStats'),head=document.getElementById('reportHead'),body=document.getElementById('reportRows');result.hidden=false;stats.hidden=false;document.getElementById('reportHeading').textContent=`تقرير ${reportTitle}`;document.getElementById('reportSubtitle').textContent=`${reportRows.length.toLocaleString('ar')} سجل · الفترة ${document.getElementById('reportFrom').value||'بلا بداية'} إلى ${document.getElementById('reportTo').value||'بلا نهاية'}`;const clinics=new Set(reportRows.map(row=>row[3]).filter(Boolean)),patients=new Set(reportRows.map(row=>row[2]).filter(Boolean));stats.innerHTML=`<div class="report-stat"><small>عدد السجلات</small><strong>${reportRows.length.toLocaleString('ar')}</strong></div><div class="report-stat"><small>المرضى</small><strong>${patients.size.toLocaleString('ar')}</strong></div><div class="report-stat"><small>العيادات</small><strong>${clinics.size.toLocaleString('ar')}</strong></div><div class="report-stat"><small>صفحة التقرير</small><strong>${Math.max(1,Math.ceil(reportRows.length/reportPageSize)).toLocaleString('ar')}</strong></div>`;head.replaceChildren();const tr=document.createElement('tr');reportColumns.forEach(label=>{const th=document.createElement('th');th.textContent=label;tr.append(th);});head.append(tr);body.replaceChildren();const pageCount=Math.max(1,Math.ceil(reportRows.length/reportPageSize));reportPage=Math.max(1,Math.min(reportPage,pageCount));reportRows.slice((reportPage-1)*reportPageSize,reportPage*reportPageSize).forEach(row=>{const tr=document.createElement('tr');row.forEach(value=>{const td=document.createElement('td');td.textContent=value==null?'—':String(value);tr.append(td);});body.append(tr);});document.getElementById('reportEmpty').hidden=reportRows.length>0;const pager=document.getElementById('reportPagination');pager.hidden=reportRows.length===0;pager.replaceChildren();if(reportRows.length){const summary=document.createElement('span');summary.textContent=`صفحة ${reportPage.toLocaleString('ar')} من ${pageCount.toLocaleString('ar')} · ${reportRows.length.toLocaleString('ar')} سجل`;const controls=document.createElement('div');controls.className='reports-actions';const size=document.createElement('select');[25,50,100,200].forEach(n=>size.add(new Option(`${n} سجل/صفحة`,String(n))));size.value=String(reportPageSize);size.addEventListener('change',()=>{reportPageSize=Number(size.value);reportPage=1;renderReportResults();});const previous=document.createElement('button');previous.className='btn';previous.type='button';previous.textContent='السابق';previous.disabled=reportPage===1;previous.addEventListener('click',()=>{reportPage--;renderReportResults();});const next=document.createElement('button');next.className='btn';next.type='button';next.textContent='التالي';next.disabled=reportPage===pageCount;next.addEventListener('click',()=>{reportPage++;renderReportResults();});controls.append(size,previous,next);pager.append(summary,controls);}document.getElementById('exportReport').disabled=reportRows.length===0;document.getElementById('printReport').disabled=reportRows.length===0;}
+      function exportReportCsv(){const escape=value=>{let text=String(value??'');if(/^[\s]*[=+@-]/.test(text))text="'"+text;return '"'+text.replace(/"/g,'""')+'"';},csv='\uFEFF'+[reportColumns,...reportRows].map(row=>row.map(escape).join(',')).join('\r\n'),blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`تقرير_${reportTitle}_${new Date().toISOString().slice(0,10)}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+      document.getElementById('runReport').addEventListener('click',runReport);document.getElementById('reportType').addEventListener('change',updateReportStatuses);document.getElementById('exportReport').addEventListener('click',exportReportCsv);document.getElementById('printReport').addEventListener('click',()=>window.print());
       function renderVisits(){
         const serviceFilter=document.getElementById('visitServiceFilter'),oldService=serviceFilter.value;serviceFilter.replaceChildren(new Option('كل الخدمات',''));serviceCatalog.forEach(service=>serviceFilter.add(new Option(service,service)));if(serviceCatalog.includes(oldService))serviceFilter.value=oldService;
         const all=patientRecords.flatMap(patient=>patient.visits.map(visit=>({patient,visit}))),query=document.getElementById('visitSearch').value.trim().toLowerCase(),service=serviceFilter.value;
@@ -1971,7 +2046,7 @@ function labStatusClass(status){return status==='مكتمل'?'done':status==='ق
         if(view==='clinics'||view==='projects'||view==='staff'){role.value='manager';role.dispatchEvent(new Event('change'));setAppView(view);}
         else if(view==='users'){setAppView('users');}
         else if(view==='laboratory'){role.value='lab';role.dispatchEvent(new Event('change'));setAppView(view);}
-        else if(view==='patient'||view==='patients'||view==='visits'||view==='pharmacy'||view==='laboratory'||view==='immunizations'||view==='referrals')setAppView(view);
+        else if(view==='patient'||view==='patients'||view==='visits'||view==='pharmacy'||view==='laboratory'||view==='immunizations'||view==='referrals'||view==='reports')setAppView(view);
         else {setAppView('placeholder');document.getElementById('pageTitle').innerHTML=this.textContent.trim()+'<small>نطاق البيانات حسب الدور والمنشأة</small>';notify('معاينة قسم: '+this.textContent.trim());}
       }));
       role.dispatchEvent(new Event('change'));
