@@ -154,21 +154,29 @@ async function loadState(user, requestedResources = null) {
   const result = {};
   const clinicRes = await pool.query("SELECT record_id,payload FROM app_records WHERE resource='clinics'");
   const clinics = clinicRes.rows.map((row) => row.payload);
-  for (const [resource, storageKey] of Object.entries(stateKeys)) {
-    if (requestedResources && !requestedResources.has(resource)) continue;
-    if (!canReadResource(user, resource)) { result[storageKey] = []; continue; }
+  const requested = Object.entries(stateKeys).filter(([resource]) => !requestedResources || requestedResources.has(resource));
+  const rowsByResource = new Map(await Promise.all(requested.map(async ([resource]) => {
+    if (!canReadResource(user, resource)) return [resource, null];
     const { rows } = await pool.query('SELECT record_id, clinic_ref, payload FROM app_records WHERE resource=$1', [resource]);
+    return [resource, rows];
+  })));
+  let allowedProjects = null;
+  if (user.role !== 'system_admin' && rowsByResource.get('projects') && (!requestedResources || requestedResources.has('projects'))) {
+    const allocations = (await pool.query('SELECT payload FROM app_records WHERE resource=$1', ['allocations'])).rows.map((row) => row.payload);
+    allowedProjects = new Set(allocations.filter((item) => user.clinicRefs.includes(String(item.clinicId))).map((item) => String(item.projectId)));
+  }
+  for (const [resource, storageKey] of requested) {
+    const rows = rowsByResource.get(resource);
+    if (!rows) { result[storageKey] = []; continue; }
     let visible = rows;
     if (user.role !== 'system_admin') {
-    if (resource === 'patients') {
+      if (resource === 'patients') {
         visible = rows.filter((row) => {
           const ownVisit = (row.payload.visits || []).some((visit) => user.clinicRefs.includes(normalizedClinicRef(visit, clinics)));
           return user.clinicRefs.includes(String(row.clinic_ref || '')) || ownVisit;
         });
       } else if (resource === 'projects') {
-        const allocations = (await pool.query('SELECT payload FROM app_records WHERE resource=$1', ['allocations'])).rows.map((r) => r.payload);
-        const allowedProjects = new Set(allocations.filter((a) => user.clinicRefs.includes(String(a.clinicId))).map((a) => String(a.projectId)));
-        visible = rows.filter((row) => allowedProjects.has(row.record_id));
+        visible = rows.filter((row) => allowedProjects?.has(row.record_id));
       } else if (resource === 'drug_catalog') {
         visible = rows;
       } else {
@@ -178,10 +186,14 @@ async function loadState(user, requestedResources = null) {
     let records = visible.map((row) => row.payload);
     if (resource === 'clinics' && user.role !== 'system_admin') records = records.filter((clinic) => user.clinicRefs.includes(String(clinic.id)));
     if (resource === 'patients' && user.role !== 'system_admin') records = records.map((item) => filterPatientRecord(item, user, clinics)).filter(Boolean);
+    // Visit rows are loaded separately by clinical screens. Remove their duplicate copy
+    // from patient list payloads to reduce transfer and browser memory.
+    if (resource === 'patients' && rowsByResource.get('visits')) records = records.map(({ visits, ...patient }) => ({ ...patient, visits: [] }));
     result[storageKey] = records;
   }
   return result;
 }
+
 
 async function syncNormalized(client, resource, payload, recordId) {
   if (resource === 'clinics') {
