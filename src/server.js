@@ -4,6 +4,7 @@ import { stat } from 'node:fs/promises';
 import { join, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHmac, randomUUID } from 'node:crypto';
+import { gzipSync, createGzip } from 'node:zlib';
 import { pool, audit } from './db.js';
 import { hashPassword, verifyPassword, opaqueToken, tokenHash, encryptNationalId, decryptNationalId, hashNationalId } from './security.js';
 import { seedDemoData } from './demo-data.js';
@@ -51,15 +52,18 @@ function sessionHash(token) {
 }
 
 function send(res, status, payload, headers = {}) {
-  const body = JSON.stringify(payload);
+  const body = Buffer.from(JSON.stringify(payload));
+  const acceptsGzip = /(?:^|,)\\s*gzip\\s*(?:,|$)/i.test(String(res.req?.headers?.['accept-encoding'] || ''));
+  const compressed = acceptsGzip && body.length >= 1024 ? gzipSync(body) : null;
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'same-origin',
+    ...(compressed ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}),
     ...headers,
   });
-  res.end(body);
+  res.end(compressed || body);
 }
 
 function cookieValue(header, name) {
@@ -1614,14 +1618,18 @@ async function serveStatic(req, res, url) {
   try {
     const info = await stat(path);
     if (!info.isFile()) return send(res, 404, { error: 'not_found' });
+    const acceptsGzip = /(?:^|,)\\s*gzip\\s*(?:,|$)/i.test(String(req.headers['accept-encoding'] || ''));
+    const compress = acceptsGzip && info.size >= 1024 && !/\\.(?:png|jpe?g|gif|webp|zip|gz|pdf|woff2?)$/i.test(path);
     res.writeHead(200, {
-      'Content-Type': contentType(path), 'Content-Length': info.size,
+      'Content-Type': contentType(path), ...(compress ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : { 'Content-Length': info.size }),
       'Cache-Control': path.endsWith('index.html') ? 'no-store' : 'public, max-age=86400',
       'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
-      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
     });
     if (req.method === 'HEAD') return res.end();
-    createReadStream(path).pipe(res);
+    const stream = createReadStream(path);
+    if (compress) stream.pipe(createGzip()).pipe(res);
+    else stream.pipe(res);
   } catch { return send(res, 404, { error: 'not_found' }); }
 }
 
